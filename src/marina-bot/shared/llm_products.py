@@ -56,6 +56,9 @@ products: one entry per product (or per product + condition) mentioned in the re
 - A reply that names two or more products, or the same product in two conditions ("1 new and 1 used cleanser"),
   gets one entry for each. A reply that gives only a quantity or only a condition gets a single entry with the
   other fields null: it answers about the product already under discussion.
+- A reply can answer the question AND add another product ("new, and 2 Volume Boosting Shampoo"): return one entry
+  for the answer (condition "new", no name) AND a separate entry for each extra product named (name and quantity).
+  Never drop a product the customer named just because the reply also answers the current question.
 
 expected_product_name (top level): set it when the bot asked what the customer ordered or expected instead; the
 product named in that answer is the expected item, NOT a product being returned, so add no entry for it.

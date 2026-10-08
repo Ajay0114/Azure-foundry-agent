@@ -19,6 +19,7 @@ from shared.llm_dates import FoundryDateReader
 from shared.llm_products import FoundryProductReader
 from shared.osw import OswClient
 from shared.state_store import FileStateStore
+from shared.zendesk import ZendeskClient
 
 load_dotenv()
 
@@ -60,6 +61,7 @@ def main():
         run_prompt=make_prompt_runner(client),
         run_agent=FoundryAgentRunner(client),
         osw=OswClient.from_env(),
+        zendesk=ZendeskClient.from_env(),
         read_dates=FoundryDateReader(client),      # model fallback for dates the parser cannot read
         read_products=FoundryProductReader(client),  # reads one reply in the product-details questions
     )

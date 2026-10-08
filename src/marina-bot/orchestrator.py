@@ -22,6 +22,7 @@ PRODUCT_RETURN = "PRODUCT_RETURN"
 OTHER = "OTHER"
 HISTORY_LINES = 10
 HISTORY_MESSAGES = 20
+TRANSCRIPT_LINES = 400        # the whole request, kept for the ticket private note
 
 CLASSIFIER_PROMPT = (
     "You classify the customer's latest message for a cruise-ship spa and retail bot. "
@@ -93,6 +94,10 @@ class Persist(Executor):
         messages = turn.session.setdefault("messages", [])
         messages += [{"role": "user", "content": turn.text}, {"role": "assistant", "content": reply}]
         turn.session["messages"] = messages[-HISTORY_MESSAGES:]
+        # The whole conversation of this request, for the ticket's private note (Kore: conversationHistory).
+        transcript = turn.session.setdefault("transcript", [])
+        transcript += [f"User: {turn.text}", f"Bot: {reply}"]
+        turn.session["transcript"] = transcript[-TRANSCRIPT_LINES:]
         self._store.save(turn.save_keys, {"session": turn.session, "entities": turn.entities})
         await ctx.yield_output(reply)
 

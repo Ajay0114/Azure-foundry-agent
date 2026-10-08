@@ -15,17 +15,19 @@ the ticket and document-request steps will need), see [CODEBASE_GUIDE.md](CODEBA
 
 | Done | Not done yet |
 |---|---|
-| Intake: greeting, name, email with confirmation and retry | Booking number and card nodes, file upload and scan, return documents |
+| Intake: greeting, name, email with confirmation and retry | Booking number and card nodes (not asked in every conversation, so left out) |
 | Entity extraction from the first message (Kore prompt, verbatim) | Validation layer |
 | Vessel lookup agent on the real OSW vessel API | Feedback survey and the closing messages after the ticket |
 | Cruise dates: parser, voyage API validation, nearest-voyage confirmation | Feedback path, clearing variables between dialogs |
 | Purchase details: purchaser (spa record) name, cabin number, purchase date, delivery type, return reason, country, phone number, cancel | Deployment to Foundry, a production state store, automated tests |
 | Product count and product details with a read-back confirmation, saved in the shape the ticket needs | |
-| "Anything else to add?", then the Zendesk ticket (created once, retry on failure) and the private conversation note | |
+| "Anything else to add?", end-of-cruise statement upload (scanned and attached to the ticket), the Zendesk ticket (created once, retry on failure), the private conversation note | |
+| The return and transactions documents requested for the ticket, with a private note on any failure | |
 | Terminal chat client for local runs | |
 
-About 45 of the dialog's 92 Kore nodes are ported. The dialog now ends with a real Zendesk ticket. Booking number, card
-last four and attachments are not asked yet, so those lines show "N/A" in the ticket, as Kore does when they are absent.
+About 55 of the dialog's 92 Kore nodes are ported. The dialog now runs from the first message to a Zendesk ticket with
+its attachments and both documents. Booking number and credit card last four are not asked (Kore asks them only in some
+conversations), so they show "N/A" in the ticket and are left out of the documents.
 
 ## Quick start
 
@@ -52,11 +54,14 @@ Copy `src/marina-bot/.env.example` to `src/marina-bot/.env` (git-ignored) and fi
 | `ZENDESK_AUTHORIZATION` | yes | The value after `Basic ` in Kore's `ZendeskAuthorization` (base64 of `email/token:api_token`). A secret. Or set `ZENDESK_EMAIL` and `ZENDESK_API_TOKEN` and it is built for you |
 | `ZENDESK_FORM_ID`, `ZENDESK_BRAND_ID`, `ZENDESK_RETURN_GROUP_ID` | yes | Ticket form, brand and the returns group |
 | `ZENDESK_FIELD_INQUIRY_TYPE`, `…_CATEGORY`, `…_PRODUCT_REASON`, `…_RETURN_STATUS`, `…_CREATED_BY`, `…_CRUISE_LINE`, `…_CRUISE_SHIP`, `…_PRIORITY`, `…_SAIL_DATE` | yes | Ids of the custom ticket fields (Kore's `Zendesk_*_ID` settings) |
+| `ATTACHMENT_API_URL`, `ATTACHMENT_API_KEY` | yes | The Azure Function that scans an uploaded file and stages it in Zendesk (Kore: `AzureFileAttachmentUrl`, `AzureFunctionKey`). The key is a secret |
+| `DOCUMENT_API_URL`, `DOCUMENT_CLIENT_ID`, `DOCUMENT_CLIENT_SECRET`, `DOCUMENT_RETURNS_SCOPE`, `DOCUMENT_TRANSACTIONS_SCOPE` | yes | The document-creation API and its OAuth client (Kore: `Document_Creation`, `DocumentCreationClientID`, `ReturnScope`, `TransactionScope`). The secret is a secret |
+| `DOCUMENT_TOKEN_URL` | optional | Defaults to `OSW_TOKEN_URL` (same tenant) |
 | `ZENDESK_TAGS` | optional | Comma separated. Defaults to `kore_ai,tag_website`, what Kore sent, so existing Zendesk triggers keep working |
 | `OSW_BASE_URL` | optional | Defaults to `https://oswbus-dev.onespaworld.com` |
 | `MARINA_STATE_DIR` | optional | Where conversation state files go. Defaults to `~/marina_state` |
 
-If a required `OSW_*` or `ZENDESK_*` value is missing, the bot stops at start-up with a message naming the missing settings.
+If a required `OSW_*`, `ZENDESK_*`, `ATTACHMENT_*` or `DOCUMENT_*` value is missing, the bot stops at start-up with a message naming the missing settings.
 **The bot creates real tickets in the Zendesk it is pointed at.** Use a sandbox while testing.
 
 ```bash
@@ -84,7 +89,8 @@ python3 chat.py                        # in a second terminal: talk to it (/new,
     │       ├── cruise_dates.py     Cruise start/end date collection and voyage validation
     │       ├── purchase_details.py Purchaser name, cabin, purchase date, delivery type, return reason, country, phone, cancel
     │       ├── product_details.py  Product count, product list (slots and questions), confirmation, saving for the ticket
-    │       ├── ticket.py           "Anything else?", the Zendesk payload, ticket creation, private note, retry
+    │       ├── ticket.py           "Anything else?", file upload, the Zendesk payload, ticket creation, private notes, documents, thanks
+    │       ├── return_documents.py Document validation, the two document payloads, the failure notes (pure functions)
     │       ├── return_extraction.py  Reads the second extraction (cabin, date, phone, country, products) into the notes
     │       └── prompts/            Prompt text copied from Kore, one .md per prompt node
     ├── shared/                 Building blocks used by every dialog
@@ -93,6 +99,9 @@ python3 chat.py                        # in a second terminal: talk to it (/new,
     │   ├── agent_node.py           The "model with tools" node and its Foundry runner
     │   ├── dates.py                Deterministic date parser and date rules
     │   ├── llm_dates.py            Model fallback for dates the parser cannot read (typed structured output)
+    │   ├── attachments.py          Reads files from the request; calls the scan-and-stage function
+    │   ├── documents.py            Document-creation API client (OAuth, returns and transactions requests)
+    │   ├── htmltext.py             HTML-escaping helper for ticket text
     │   ├── zendesk.py              Zendesk client: create ticket, private note, find by external id (settings from the environment)
     │   ├── llm_products.py         Model reader for one reply in the product questions (typed structured output)
     │   ├── countries.py            Country names and aliases ("UK" becomes "United Kingdom")
@@ -168,7 +177,9 @@ Node ids are in `workflow.py`, `cruise_dates.py`, `purchase_details.py`, `produc
 | `pd_confirm_products` | yes/no | Reads the list back; No starts the list again | Kore asks to confirm but never reads the answer |
 | `pd_reset_products`, `pd_save_products` | script | Clear the list / build the ticket list (`productsToReturn`, summary, outcome) | `PC_HomeDelivery_Script_SavingAgentData` |
 | `pd_ask_additional` | question | "Is there anything else you'd like to add?" (optional free text) | `PC_Common_Entity_AdditionalDescription` |
-| `pd_create_ticket` | service | Builds the payload, creates the Zendesk ticket, adds the private transcript, thanks the customer with the ticket number. On failure offers a retry | `PC_HomeDelivery_Script_PrepareZendeskData`, `…_Service_CreateTicket`, `…_ConversationPrivateNote`, `…_ThanksMessage`, `…_Message_TicketFailed` |
+| `pd_ask_upload` | question | "Upload your end-of-cruise statement or type Skip"; a file is scanned and staged by the attachment service. A blocked type or malware, or an upload error, asks again (three tries) | `HomeDelivery_Entity_Upload`, `…_Script_PrepareAzureData`, `…_Service_ScanUpload`, `…_Script_HandleScanResult` and the three upload error messages |
+| `pd_create_ticket` | service | Builds the payload, creates the Zendesk ticket, adds the private transcript. On failure offers a retry | `PC_HomeDelivery_ValidationScript`, `PC_HomeDelivery_Script_PrepareZendeskData`, `…_Service_CreateTicket`, `…_ConversationPrivateNote`, `…_Message_TicketFailed` |
+| `pd_finalise_request` | service | Adds the attachments to the ticket, requests the returns and transactions documents, notes any failure on the ticket, thanks the customer with the ticket number | `…_Service_PrivateNoteAttachmentAPI`, `…_Script_ReturnDocuments`, `DocumentCreation_Service_Returns`, `…_Transcations`, the error and validation-fail scripts, `…_ThanksMessage` |
 
 ### Vessel lookup (`vessel.py`, `pr_vessel_agent`)
 
@@ -263,7 +274,27 @@ decides everything else.
   Kore ends the dialog and loses everything.
 - **Private note.** The whole conversation of this request (`session["transcript"]`, started fresh with every new request)
   is added as a private comment. If the note fails the ticket still stands and the customer is thanked.
-- **Result.** `session["TicketId"]` for the later steps (document request).
+- **Result.** `session["TicketId"]`, used as the `referenceId` of both documents.
+
+### File upload and the two documents (`ticket.py`, `return_documents.py`, `shared/attachments.py`, `shared/documents.py`)
+
+- **Upload.** The customer attaches a file in the chat client, which sends it with the message as an `input_file` or
+  `input_image` item. Only items with an **https link** are used, because the scan function downloads the file itself;
+  inline data or a stored-file id cannot be passed on and is treated as an upload error. The function (Kore's
+  `/api/upload`) scans for malware and file type, uploads to Zendesk and returns tokens, which are attached to the ticket
+  as a private note. Up to five files. The function decides which hosts it will download from. Locally, `chat.py`
+  has `/attach <https-url>` to send a file link with your next message.
+- **Validation** (Kore's `ValidationScript`): each document lists the fields it needs (guest name, email, phone, country,
+  cruise line, ship, cabin, embarkation, purchase and request dates, products for the returns document; vessel id,
+  start and end date, guest name, cabin for the transactions document). Unknown or placeholder values count as missing.
+- **Documents.** The returns document and the transactions document are requested separately, each with the ticket id as
+  `referenceId`. A document whose fields are incomplete is not requested; a private note on the ticket says what is
+  missing, and the ticket gets the tag `returns_documentcreaterequestfailed` or `transactions_documentcreaterequestfailed`
+  (Kore adds both whenever either fails). If the API refuses a request, a private note carries its error text. Neither
+  failure stops the other document or the thank-you.
+- **Not sent:** booking number and credit card last four. The returns payload also differs from Kore's in two small ways:
+  it sends only products with a name and a quantity, and `clientMetadata` holds one `source` entry instead of Kore's
+  `Key1/Value1` placeholders. If the document API insists on the old shape, that is one line in `return_documents.py`.
 
 ## Conversation state and variables
 
@@ -313,9 +344,12 @@ end (so a failed turn saves nothing). State lives in one JSON file per key under
 - **State store.** Local JSON files: no expiry, no encryption (name and email are stored in clear text), and simultaneous
   messages from one customer can overwrite each other. Replace `shared/state_store.py` (two methods) with Cosmos DB or the
   Foundry state store before production.
-- **Ticket gaps.** The ticket has no booking number, card last four or attachments yet ("N/A"), and the return-document
-  API calls that follow the ticket in Kore are not ported. Zendesk field ids and the form must match the Zendesk you
-  point at; a wrong id is rejected by Zendesk and shows up as a failed create in the log (status code only).
+- **Ticket gaps.** Booking number and card last four are not asked, so the ticket shows "N/A" and the documents omit them.
+  Zendesk field ids and the form must match the Zendesk you point at; a wrong id is rejected by Zendesk and shows up as a
+  failed create in the log (status code only).
+- **Attachments need a link.** A file sent as inline base64 or a stored-file id cannot be scanned by the Azure Function;
+  the chat front end must send an https link (Kore's channel did).
+- **Not live-tested.** The attachment service and the document API have only been exercised against fakes so far.
 - **No cleanup between dialogs.** Ending a dialog clears only `active_dialog` and `dialog_step`. Vessel flags and `vessel_id`
   persist, so a second return in the same conversation would skip the ship question. Kore's `ClearData` step is not ported.
 - **Simplified checks.** Name, email, purchaser name, cabin, phone, delivery type and return reason validation are plain
@@ -332,7 +366,7 @@ end (so a failed turn saves nothing). State lives in one JSON file per key under
 - The OAuth client secret appeared in plain text in the Postman collections the APIs were taken from. Rotate it and keep the
   new value out of the repo.
 - Logs contain dates, vessel ids, node names and Zendesk status codes, never tokens, the client secrets or customer details.
-- The Zendesk credential is read from the environment only. Use an API token for a dedicated Zendesk user with the
+- The Zendesk credential, the attachment function key and the document client secret are read from the environment only. Use an API token for a dedicated Zendesk user with the
   least access that can create tickets and add comments.
 - The conversation transcript, name, email and phone are stored in the state files in clear text (see the state-store
   limitation above) and sent to Zendesk, where they belong. Tickets are created in whichever Zendesk `ZENDESK_BASE_URL` names.

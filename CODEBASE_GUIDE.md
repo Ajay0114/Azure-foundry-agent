@@ -46,6 +46,9 @@ All real HTTP calls live in **`shared/osw.py`**. The dialogs never make HTTP cal
 | `GET /info/cruiselines/{id}` | Look up a cruise line name when a vessel record has only its id | same tool |
 | `GET /master/itinerary/vessels/{id}/embarkation/date/{yyyymmdd}` | A voyage that **started** on the date | `cruise_dates.py`, step `cd_validate` |
 | `GET /master/itinerary/vessels/{id}/any/date/{yyyymmdd}` | Voyages that **contain** the date; the nearest one is chosen | same step, only if there is no exact match |
+| `POST {ATTACHMENT_API_URL}/api/upload` | Scan the customer's file(s) for malware and file type, stage them in Zendesk; returns upload tokens | `ticket.py`, step `pd_ask_upload` |
+| `POST {DOCUMENT_API_URL}/cscbot/post-voyage/products-return/documents/requests` | Request the products-return document for the ticket (OAuth, returns scope) | `ticket.py`, step `pd_finalise_request` |
+| `POST {DOCUMENT_API_URL}/cscbot/post-voyage/transactions/documents/requests` | Request the transactions document for the ticket (OAuth, transactions scope) | same step |
 | `POST {ZENDESK_BASE_URL}/api/v2/tickets.json` | Create the return ticket (never retried blindly) | `ticket.py`, step `pd_create_ticket` |
 | `PUT {ZENDESK_BASE_URL}/api/v2/tickets/{id}.json` | Add the private conversation note | same step |
 | `GET {ZENDESK_BASE_URL}/api/v2/tickets.json?external_id=…` | Look for a ticket this request already created before a retry | same step |
@@ -53,7 +56,7 @@ All real HTTP calls live in **`shared/osw.py`**. The dialogs never make HTTP cal
 The vessels and itinerary APIs use **different OAuth scopes**, so there is one token per scope. A `401` triggers one token
 refresh and retry; a `404` on the voyage endpoints means "no match".
 
-**Not built yet:** the document-request API, and file scan and upload. The only other
+**Not built yet:** the booking-number and credit-card steps (not asked in every conversation). The only other
 external store is the state file (section 5).
 
 ## 4. File by file
@@ -77,7 +80,8 @@ external store is the state file (section 5).
 | `cruise_dates.py` | The date nodes (`cd_start`, `cd_ask_start`, `cd_validate`, `cd_confirm_nearest`, `cd_ask_end`, `cd_finish`) and a typed `CruiseDatesState` stored under `session["cruiseDates"]`. `cd_finish` publishes `start_date`, `end_date`, `usr_start_date`, `usr_end_date` and `dateCompleted` |
 | `purchase_details.py` | The purchase-details nodes (`pd_*`): purchaser name, second extraction, cabin number, policy note, purchase date, delivery type, return reason (and the "Other" description), phone number and cancel. A typed `PurchaseDetailsState` (ask and failure counters, partial dates, last rejected date) is stored under `session["purchaseDetails"]`. `start_purchase_details` clears the previous answers of this stage so a second return starts clean |
 | `product_details.py` | Product count and product details (`pd_ask_product_count`, `pd_ask_products`, `pd_confirm_products`, `pd_reset_products`, `pd_save_products`). The decision logic is a set of small pure functions (`next_question`, `apply_reading`, `is_complete`) that fill product slots from what the model read; `save_products` builds `productsToReturn` in the shape Kore's ticket script expects |
-| `ticket.py` | "Anything else to add?" (`pd_ask_additional`) and the ticket step (`pd_create_ticket`). `build_ticket_payload` and `build_description` are pure functions (Kore's `PrepareZendeskData`); `build_private_note` builds the transcript comment. Customer text is HTML-escaped |
+| `return_documents.py` | Pure functions: which fields each document needs (`validate_documents`, Kore's `ValidationScript`), the two document payloads, the private notes for a missing field or an API error, and the failure tags |
+| `ticket.py` | "Anything else to add?" (`pd_ask_additional`), the file upload question (`pd_ask_upload`), the ticket step (`pd_create_ticket`) and the closing step (`pd_finalise_request`: attachment note, both documents, thank-you). `build_ticket_payload` and `build_description` are pure functions (Kore's `PrepareZendeskData`); `build_private_note` builds the transcript comment. Customer text is HTML-escaped |
 | `return_extraction.py` | Port of Kore's `SaveEntities` script: validates the second extraction's output and stores cabin, raw purchase date, country, phone, product count, products, and "customer doesn't know" flags |
 | `prompts/` | The prompt texts copied from Kore, one `.md` per prompt, with `{{placeholders}}` |
 
@@ -92,6 +96,9 @@ external store is the state file (section 5).
 | `llm_dates.py` | Model call #4 and the validation of its typed answer |
 | `llm_products.py` | Model call #6 and the validation of its typed answer (`ProductReading`) |
 | `countries.py` | Country names and aliases; turns "I live in the UK" into "United Kingdom" |
+| `attachments.py` | `extract_attachments` (files with https links from the request items), `AttachmentClient` (the scan-and-stage function), and its settings |
+| `documents.py` | `DocumentClient`: OAuth client credentials (one token per scope, one refresh on a 401) and the two document requests; `error_detail` follows Kore's error-text order |
+| `htmltext.py` | `esc`: HTML-escapes customer and API text before it goes into a ticket |
 | `zendesk.py` | The Zendesk client and its settings (`ZendeskConfig.from_env`): create ticket, private note, find by external id. Errors carry the status code, never the response body |
 | `osw.py` | The OneSpaWorld API client and all response parsing (section 3) |
 | `deps.py` | One bundle of outside connections: the one-shot model call, the agent runner, the OSW client, the clock, Zendesk, and the optional date and product readers |
@@ -138,14 +145,15 @@ snapshot file per message. A failed message saves nothing, so the next try start
 | `session.extractionStatus`, other `…Unknown` flags | `pd_save_extraction` |
 | `session.customerName`, `customerEmail`, `purchaseDetails` | `pd_vars` and the `pd_*` nodes |
 | `session.TicketId`, `ticketExternalId`, `ticketError`, `privateNoteFailed`; `entities.PC_Common_Entity_AdditionalDescription` | `pd_ask_additional`, `pd_create_ticket` |
+| `session.zd_tokens_combined` (upload tokens), `returnsValidationStatus`, `transactionValidationStatus`, `returnsFailedFieldsDisplay`, `transactionFailedFieldsDisplay`, `documentFailTags`, `returnsDocumentStatus`, `transactionsDocumentStatus` (`created`, `failed`, `not_requested` or `skipped`) | `pd_ask_upload`, `pd_create_ticket`, `pd_finalise_request` |
 | `session.transcript` (the whole request, last 400 lines; cleared when a new request starts) | `Persist`, and the entry step |
 | `session.active_dialog`, `dialog_step` | the classifier, and any step that pauses |
 | `session.conversationHistoryString` (last 10 lines), `session.messages` (last 20) | `Persist` |
 
-## 6. What the ticket and document-request steps will need
+## 6. What the ticket and document steps use
 
-Kore's Zendesk and document steps read the **same session keys** this bot stores, so ported scripts can stay close to the
-originals. The tables below come from Kore's `PC_HomeDelivery_Script_PrepareZendeskData`, the `CreateTicket` service payload,
+Kore's Zendesk and document steps read the **same session keys** this bot stores, so the ported scripts stay close to the
+originals. The ticket, the attachments and both documents are built; what is still open is listed under "Still to be collected". The tables below come from Kore's `PC_HomeDelivery_Script_PrepareZendeskData`, the `CreateTicket` service payload,
 and the `DocumentCreation_Service_Returns` / `…_Transcations` payloads.
 
 ### Already captured

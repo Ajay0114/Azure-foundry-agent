@@ -10,6 +10,7 @@ from shared.flow import PromptRunner
 from shared.llm_dates import DateReader
 from shared.llm_products import ProductReader
 from shared.osw import OswApi
+from shared.zendesk import ZendeskApi
 
 
 @dataclass
@@ -19,4 +20,5 @@ class Deps:
     osw: OswApi                # OneSpaWorld vessel + itinerary APIs
     today: Callable[[], date] = utc_today        # the clock (UTC)
     read_dates: DateReader | None = None         # model fallback for dates the parser cannot read (optional)
+    zendesk: ZendeskApi | None = None            # Zendesk (ticket + private note)
     read_products: ProductReader | None = None   # model reader for the product questions (optional)

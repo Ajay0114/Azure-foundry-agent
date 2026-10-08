@@ -186,12 +186,14 @@ _STAGE_SESSION_KEYS = (
     "returnReasonMapped", "otherReturnReason", "countryCompleted", "countryRetryCount", "ProductCountUnknown",
     "productCountCompleted", "returnDetailsCompleted", "remainingQuantity", "ProductsCollected", "productsToReturn",
     "productsToReturnJSON", "all_products_summary", "collectedUnits", "countMismatch", "collectionOutcome",
-    "partialReturn", "productDataAnomaly", "agentNodeExitPath", "productDetails")
+    "partialReturn", "productDataAnomaly", "agentNodeExitPath", "productDetails", "TicketId", "ticketExternalId",
+    "ticketError", "privateNoteFailed")
 _STAGE_PII_KEYS = ("sparecordname", "nameAsPerSpa", "phoneNumber")
 _STAGE_ENTITY_KEYS = ("SpaRecordName", "PC_Common_2_Entity_NameAsPerSpaRecords", "CabinNumber", "CabinNumbers",
                       "PurchasedDate", "Country", "ProductCount", "PC_HomeDelivery_Entity_PhoneNumber",
                       "PC_HomeDelivery_Entity_DeliveryType", "PC_HomeDelivery_Entity_IssueReasonButtons",
-                      "PC_HomeDelivery_Entity_Reason", "ProductsCollected", "AllProductsCaptured")
+                      "PC_HomeDelivery_Entity_Reason", "ProductsCollected", "AllProductsCaptured",
+                      "PC_Common_Entity_AdditionalDescription")
 
 
 def start_purchase_details(turn: Turn) -> None:
