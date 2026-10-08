@@ -16,8 +16,7 @@ from orchestrator import build_orchestrator
 from shared.agent_node import FoundryAgentRunner
 from shared.deps import Deps
 from shared.llm_dates import FoundryDateReader
-from shared.osw import osw_from_env
-from shared.osw_stub import StubOsw
+from shared.osw import OswClient
 from shared.state_store import FileStateStore
 
 load_dotenv()
@@ -59,7 +58,7 @@ def main():
     deps = Deps(
         run_prompt=make_prompt_runner(client),
         run_agent=FoundryAgentRunner(client),
-        osw=osw_from_env(fallback=StubOsw()),
+        osw=OswClient.from_env(),
         read_dates=FoundryDateReader(client),      # model fallback for dates the parser cannot read
     )
     store = FileStateStore()

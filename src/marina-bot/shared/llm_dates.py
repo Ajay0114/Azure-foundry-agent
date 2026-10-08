@@ -73,8 +73,8 @@ def to_reading(parsed: LlmDateReading) -> DateReading:
 class FoundryDateReader:
     """DateReader backed by a Foundry chat client using structured output."""
 
-    def __init__(self, client: Any, agent: Any | None = None):
-        self._agent = agent or Agent(client=client, name="date_reader", instructions=INSTRUCTIONS)   # agent: tests
+    def __init__(self, client: Any):
+        self._agent = Agent(client=client, name="date_reader", instructions=INSTRUCTIONS)
 
     async def __call__(self, text: str, field: str) -> DateReading | None:
         prompt = f"The customer was asked for the cruise {field} date. Their reply:\n{text}"

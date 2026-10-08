@@ -1,4 +1,4 @@
-"""Everything the dialogs need from the outside world, passed in once so tests can swap it."""
+"""Everything the dialogs need from the outside world, passed in once."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -15,6 +15,6 @@ from shared.osw import OswApi
 class Deps:
     run_prompt: PromptRunner   # prompt nodes: one-shot LLM call
     run_agent: AgentRunner     # agent nodes: tool-calling LLM loop
-    osw: OswApi                # OneSpaWorld vessel + itinerary APIs (real client, or StubOsw offline)
-    today: Callable[[], date] = utc_today        # the clock: tests pin it, production uses UTC
+    osw: OswApi                # OneSpaWorld vessel + itinerary APIs
+    today: Callable[[], date] = utc_today        # the clock (UTC)
     read_dates: DateReader | None = None         # model fallback for dates the parser cannot read (optional)

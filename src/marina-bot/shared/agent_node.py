@@ -12,12 +12,12 @@ One chat turn runs this node once:
         done      -> continue to the next node
         not done  -> say the LLM's text (its question) and pause here; the next message resumes here
 
-The LLM call itself is behind `AgentRunner`, so tests can script it without Azure.
+The LLM call itself is behind `AgentRunner`, which keeps the node logic independent of the model client.
 """
 
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from agent_framework import Agent, Executor, Message, WorkflowContext, handler, tool

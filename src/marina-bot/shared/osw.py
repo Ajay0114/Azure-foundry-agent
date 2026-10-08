@@ -11,20 +11,19 @@ Endpoints (from the Postman collections "OSW Dev Vessels Information API" / "Iti
 
 Auth: OAuth2 client credentials against Azure Entra ID. The two APIs use different scopes.
 
-Configuration (environment variables; NEVER commit values):
+Configuration (environment variables; NEVER commit values). All are required except OSW_BASE_URL:
   OSW_BASE_URL            default https://oswbus-dev.onespaworld.com
-  OSW_TOKEN_URL           Postman variable accessTokenUrl
-  OSW_CLIENT_ID           Postman variable clientId
-  OSW_CLIENT_SECRET       Postman variable clientSecret   (a secret: keep it in .env / Key Vault only)
-  OSW_VESSELS_SCOPE       scope of the Vessels collection   (api://<id>/.default)
-  OSW_ITINERARY_SCOPE     scope of the Itinerary collection (api://<id>/.default)
+  OSW_TOKEN_URL           OAuth token endpoint
+  OSW_CLIENT_ID           OAuth client id
+  OSW_CLIENT_SECRET       OAuth client secret   (a secret: keep it in .env / Key Vault only)
+  OSW_VESSELS_SCOPE       scope of the Vessels API   (api://<id>/.default)
+  OSW_ITINERARY_SCOPE     scope of the Itinerary API (api://<id>/.default)
 
-The response shapes were confirmed with probe_osw.py against the dev API (see the "Parsing" section). All
-response parsing lives in that one section, so a change in the API means editing only those functions.
+The response shapes were confirmed against the dev API (see the "Parsing" section). All response parsing
+lives in that one section, so a change in the API means editing only those functions.
 """
 
 import asyncio
-import logging
 import os
 import re
 import time
@@ -34,8 +33,6 @@ from datetime import date
 from typing import Any, Protocol
 
 import httpx
-
-log = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://oswbus-dev.onespaworld.com"
 MAX_CRUISE_LINES_EXPANDED = 3     # when searching by cruise line, expand at most this many matching lines
@@ -198,13 +195,12 @@ class OswConfig:
         return f"OswConfig(base_url={self.base_url!r}, client_id={self.client_id!r}, client_secret='***')"
 
     @classmethod
-    def from_env(cls) -> "OswConfig | None":
+    def from_env(cls) -> "OswConfig":
         values = {k: os.environ.get(k, "").strip() for k in (
             "OSW_TOKEN_URL", "OSW_CLIENT_ID", "OSW_CLIENT_SECRET", "OSW_VESSELS_SCOPE", "OSW_ITINERARY_SCOPE")}
         missing = [k for k, v in values.items() if not v]
         if missing:
-            log.warning("OSW API not configured (missing: %s).", ", ".join(missing))
-            return None
+            raise RuntimeError(f"OSW API settings are missing: {', '.join(missing)}. Set them in .env.")
         return cls(base_url=os.environ.get("OSW_BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
                    token_url=values["OSW_TOKEN_URL"], client_id=values["OSW_CLIENT_ID"],
                    client_secret=values["OSW_CLIENT_SECRET"], vessels_scope=values["OSW_VESSELS_SCOPE"],
@@ -217,12 +213,15 @@ def rql_text(value: str) -> str:
 
 
 class OswClient:
-    def __init__(self, config: OswConfig, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(self, config: OswConfig):
         self._cfg = config
-        self._transport = transport                  # tests inject httpx.MockTransport
         self._tokens: dict[str, tuple[str, float]] = {}
         self._token_lock = asyncio.Lock()
         self._line_names: dict[str, str] = {}
+
+    @classmethod
+    def from_env(cls) -> "OswClient":
+        return cls(OswConfig.from_env())
 
     # ---- low level -------------------------------------------------------------------------
     async def _token(self, client: httpx.AsyncClient, scope: str, force: bool = False) -> str:
@@ -241,8 +240,7 @@ class OswClient:
 
     async def get_json(self, path: str, scope: str, params: dict[str, str] | None = None,
                        allow_404: bool = False) -> Any:
-        async with httpx.AsyncClient(base_url=self._cfg.base_url, timeout=self._cfg.timeout,
-                                     transport=self._transport) as client:
+        async with httpx.AsyncClient(base_url=self._cfg.base_url, timeout=self._cfg.timeout) as client:
             for attempt in (0, 1):
                 token = await self._token(client, scope, force=attempt == 1)
                 response = await client.get(path, params=params, headers={"Authorization": f"Bearer {token}"})
@@ -304,12 +302,3 @@ class OswClient:
             iso_date,
             lambda: self._voyages(f"{base}/embarkation/date/{ymd}"),
             lambda: self._voyages(f"{base}/any/date/{ymd}"))
-
-
-def osw_from_env(fallback: OswApi) -> OswApi:
-    """The real client when configured, otherwise the supplied stub (local development)."""
-    config = OswConfig.from_env()
-    if config is None:
-        log.warning("Using the built-in STUB for vessel and voyage data (fake data).")
-        return fallback
-    return OswClient(config)

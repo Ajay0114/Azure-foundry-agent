@@ -264,7 +264,3 @@ def utc_today() -> date:
 def is_future(iso: str, today: date, tolerance_days: int = 1) -> bool:
     """After today. One day of tolerance so a ship in a time zone ahead of UTC is not rejected."""
     return date.fromisoformat(iso) > today + timedelta(days=tolerance_days)
-
-
-def apply_year(partial: PartialDate, year: int) -> PartialDate:
-    return partial.with_year(year)

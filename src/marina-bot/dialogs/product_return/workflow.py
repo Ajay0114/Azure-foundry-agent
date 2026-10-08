@@ -1,6 +1,6 @@
 """Product Return dialog (Kore: PC_HomeDelivery) as one sub-workflow.
 
-Ported so far (Kore order, see docs/kore-reference/flow.md):
+Ported so far (in Kore order):
 
   intent0
    -> PC_Common_1_Script_InitialUserMessage        pr_initial_message
@@ -32,7 +32,8 @@ from shared.agent_node import AgentNode
 from shared.deps import Deps
 from shared.flow import ConfirmNode, MessageNode, PromptNode, ScriptNode, SlotNode, connect, finish, goto
 from shared.prompts import load_prompt
-from shared.validators import parse_email, parse_full_name, parse_yes_no
+from shared.dates import read_yes_no
+from shared.validators import parse_email, parse_full_name
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
@@ -110,7 +111,7 @@ def build_product_return_workflow(deps: Deps) -> Workflow:
         prompt=lambda t: "Just to confirm — is this the best email to contact you?\n"
                          f"*{t.entities.get(EMAIL_SLOT, '')}*\n\n"
                          "Reply *Yes* to confirm or *No* to re-enter it.",
-        yes_id="pr_extract", no_id="pr_delete_email", parse_yes_no=parse_yes_no)
+        yes_id="pr_extract", no_id="pr_delete_email", parse_yes_no=read_yes_no)
     delete_email = ScriptNode("pr_delete_email", _delete_email, "pr_email")
     extract = PromptNode(
         "pr_extract", run_prompt,
