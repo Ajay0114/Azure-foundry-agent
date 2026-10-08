@@ -18,6 +18,8 @@ class TurnInput:
     text: str
     load_keys: list[str] = field(default_factory=list)   # state keys to look up (conversation / previous response)
     save_keys: list[str] = field(default_factory=list)   # state keys to write after this turn
+    attachments: list[dict[str, str]] = field(default_factory=list)   # [{"url", "name"}] files sent with this message
+    attachments_unusable: int = 0                        # files sent that cannot be used (no https URL)
 
 
 @dataclass
@@ -30,6 +32,8 @@ class Turn:
     route: str = ""                  # id of the executor that must run next
     resuming: bool = False           # True when `text` is the answer to the question a node asked last turn
     replies: list[str] = field(default_factory=list)
+    attachments: list[dict[str, str]] = field(default_factory=list)   # files sent with this message
+    attachments_unusable: int = 0
 
     @property
     def ctx(self) -> DialogContext:

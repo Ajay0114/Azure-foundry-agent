@@ -42,7 +42,8 @@ class TurnEntry(Executor):
     @handler
     async def run(self, inp: TurnInput, ctx: WorkflowContext[Turn]) -> None:
         saved = self._store.load(inp.load_keys) or {}
-        turn = Turn(text=inp.text, save_keys=inp.save_keys,
+        turn = Turn(text=inp.text, save_keys=inp.save_keys, attachments=inp.attachments,
+                    attachments_unusable=inp.attachments_unusable,
                     session=saved.get("session", {}), entities=saved.get("entities", {}))
         active = turn.session.get("active_dialog")
         await goto(ctx, turn, PRODUCT_RETURN.lower() if active == PRODUCT_RETURN else "intent_classifier")

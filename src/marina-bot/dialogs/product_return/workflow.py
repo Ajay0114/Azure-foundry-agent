@@ -20,7 +20,8 @@ Ported so far (in Kore order):
    -> purchaser name, second extraction, cabin number, return policy note, purchase date, phone
                                                    pd_* nodes, see purchase_details.py
    -> country, product count, product details, confirmation, save    pd_* nodes, see product_details.py
-   -> anything else to add, create the Zendesk ticket + private note   pd_ask_additional, pd_create_ticket, see ticket.py
+   -> anything else to add, file upload, create the Zendesk ticket + private notes, attachment note, return and
+      transactions documents, thank the customer      pd_ask_additional ... pd_finalise_request, see ticket.py
 """
 
 from pathlib import Path
@@ -132,7 +133,7 @@ def build_product_return_workflow(deps: Deps) -> Workflow:
 
     builder = WorkflowBuilder(name="product-return", start_executor=entry,
                               output_from=[name, email, confirm, vessel_agent, *dates.pause_nodes,
-                                           *purchase.outputs, *products.outputs, *tickets.pause_nodes])
+                                           *purchase.outputs, *products.outputs, *tickets.outputs])
     for src, dst in [
         (entry, initial), (entry, name), (entry, email), (entry, confirm), (entry, vessel_agent),  # new dialog / resume points
         *[(entry, node) for node in [*dates.pause_nodes, *purchase.pause_nodes, *products.pause_nodes,

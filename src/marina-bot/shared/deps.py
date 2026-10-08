@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import date
 
 from shared.agent_node import AgentRunner
+from shared.attachments import AttachmentUploader
+from shared.documents import DocumentApi
 from shared.dates import utc_today
 from shared.flow import PromptRunner
 from shared.llm_dates import DateReader
@@ -21,4 +23,6 @@ class Deps:
     today: Callable[[], date] = utc_today        # the clock (UTC)
     read_dates: DateReader | None = None         # model fallback for dates the parser cannot read (optional)
     zendesk: ZendeskApi | None = None            # Zendesk (ticket + private note)
+    attachments: AttachmentUploader | None = None    # scan and stage the customer's files
+    documents: DocumentApi | None = None         # return and transaction document requests
     read_products: ProductReader | None = None   # model reader for the product questions (optional)

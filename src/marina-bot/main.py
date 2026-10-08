@@ -1,3 +1,4 @@
+import logging
 import os
 
 from agent_framework import Agent
@@ -14,7 +15,9 @@ except ImportError:  # not re-exported in this release
 from models import TurnInput
 from orchestrator import build_orchestrator
 from shared.agent_node import FoundryAgentRunner
+from shared.attachments import AttachmentClient, extract_attachments
 from shared.deps import Deps
+from shared.documents import DocumentClient
 from shared.llm_dates import FoundryDateReader
 from shared.llm_products import FoundryProductReader
 from shared.osw import OswClient
@@ -22,6 +25,7 @@ from shared.state_store import FileStateStore
 from shared.zendesk import ZendeskClient
 
 load_dotenv()
+log = logging.getLogger(__name__)
 
 # "module:qualname" of every application type that travels through the workflow as a message.
 ALLOWED_CHECKPOINT_TYPES = ["models:TurnInput", "models:Turn"]
@@ -45,10 +49,16 @@ async def parse_response(request: HostedResponseRequest) -> WorkflowTurn[TurnInp
     chains with previous_response_id, and saved under this conversation / response id.
     """
     text = await request.get_input_text() or ""
+    try:                                                  # files sent with the message (Kore: the attachment entity)
+        attachments, unusable = extract_attachments(await request.get_input_items())
+    except (TypeError, ValueError, AttributeError, KeyError):
+        log.warning("could not read the input items; continuing without attachments")
+        attachments, unusable = [], 0
     previous = request.request.get("previous_response_id")
     load_keys = [k for k in (request.conversation_id, previous) if k]
     save_keys = [k for k in (request.conversation_id, request.response_id) if k]
-    return WorkflowTurn(input=TurnInput(text=text, load_keys=load_keys, save_keys=save_keys))
+    return WorkflowTurn(input=TurnInput(text=text, load_keys=load_keys, save_keys=save_keys,
+                                        attachments=attachments, attachments_unusable=unusable))
 
 
 def main():
@@ -62,6 +72,8 @@ def main():
         run_agent=FoundryAgentRunner(client),
         osw=OswClient.from_env(),
         zendesk=ZendeskClient.from_env(),
+        attachments=AttachmentClient.from_env(),
+        documents=DocumentClient.from_env(),
         read_dates=FoundryDateReader(client),      # model fallback for dates the parser cannot read
         read_products=FoundryProductReader(client),  # reads one reply in the product-details questions
     )

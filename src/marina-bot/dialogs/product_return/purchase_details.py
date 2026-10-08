@@ -187,7 +187,9 @@ _STAGE_SESSION_KEYS = (
     "productCountCompleted", "returnDetailsCompleted", "remainingQuantity", "ProductsCollected", "productsToReturn",
     "productsToReturnJSON", "all_products_summary", "collectedUnits", "countMismatch", "collectionOutcome",
     "partialReturn", "productDataAnomaly", "agentNodeExitPath", "productDetails", "TicketId", "ticketExternalId",
-    "ticketError", "privateNoteFailed")
+    "ticketError", "privateNoteFailed", "zd_tokens_combined", "returnsValidationStatus", "transactionValidationStatus",
+    "returnsFailedFieldsDisplay", "transactionFailedFieldsDisplay", "documentFailTags", "returnsDocumentStatus",
+    "transactionsDocumentStatus")
 _STAGE_PII_KEYS = ("sparecordname", "nameAsPerSpa", "phoneNumber")
 _STAGE_ENTITY_KEYS = ("SpaRecordName", "PC_Common_2_Entity_NameAsPerSpaRecords", "CabinNumber", "CabinNumbers",
                       "PurchasedDate", "Country", "ProductCount", "PC_HomeDelivery_Entity_PhoneNumber",

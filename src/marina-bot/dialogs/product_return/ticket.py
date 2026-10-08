@@ -25,7 +25,6 @@ Still to be ported (shown as "N/A" in the ticket, as in Kore when absent): booki
 attachments, and the return-document API calls.
 """
 
-import html
 import logging
 import re
 import uuid
@@ -34,19 +33,28 @@ from typing import Any
 
 from agent_framework import Executor, WorkflowContext, handler
 
-from dialogs.product_return.purchase_details import PurchaseDetailsState, QuestionNode, is_resolved
+from dialogs.product_return.purchase_details import (MSG_CONTINUE_WITHOUT, PurchaseDetailsState, QuestionNode,
+                                                     is_resolved)
+from dialogs.product_return.return_documents import (apply_validation, build_returns_payload,
+                                                     build_transactions_payload, error_note, validate_documents,
+                                                     validation_notes)
 from models import Turn
 from shared.cancel import is_cancel_request
+from shared.attachments import AttachmentBlocked, AttachmentError
 from shared.dates import read_yes_no, says_skip
 from shared.deps import Deps
+from shared.documents import DocumentError
 from shared.flow import connect, finish
+from shared.htmltext import esc
 from shared.validators import says_finished
 from shared.zendesk import TicketSettings, ZendeskApi, ZendeskError
 
 log = logging.getLogger(__name__)
 
-PD_ASK_ADDITIONAL, PD_CREATE_TICKET = "pd_ask_additional", "pd_create_ticket"
+PD_ASK_ADDITIONAL, PD_ASK_UPLOAD = "pd_ask_additional", "pd_ask_upload"
+PD_CREATE_TICKET, PD_FINALISE = "pd_create_ticket", "pd_finalise_request"
 MAX_TICKET_ATTEMPTS = 3
+MAX_UPLOAD_ATTEMPTS = 3
 MAX_ADDITIONAL_LENGTH = 2000
 SUBJECT = "Your Product Return Request Has Been Received"
 PRIORITY = "urgent"
@@ -54,6 +62,17 @@ NOT_PROVIDED = "Not Provided"
 CATEGORIES = {"Onboard Purchase": "osw_onboard_purchase", "Home Delivery": "osw_home_delivery_hd"}
 
 MSG_ADDITIONAL = "Is there anything else you'd like to add? Any additional details will help us assist you faster."
+MSG_START = "That’s perfect — I have what I need to look up the right records."
+MSG_UPLOAD = ("If you have your end-of-cruise statement, you can upload it here — a PDF or a clear photo works. \n"
+              "If not, you can type *Skip*.\n\n"
+              "To attach a file, tap the *paperclip icon ( 📎 )* in the bottom-left corner of the chat, then select *Media* "
+              "for images (PNG, JPG, GIF, BMP) or *File* for documents (PDF).")
+MSG_UPLOAD_MALWARE = "⚠️ One or more files you uploaded were flagged by our security scan and have been blocked."
+MSG_UPLOAD_FILETYPE = ("⚠️ The file format you uploaded is not supported.\n"
+                       "Accepted formats: PDF, and IMAGE (PNG, JPG, JPEG, GIF, BMP)")
+MSG_UPLOAD_ERROR = "⚠️ Something went wrong with file upload. Please try again!"
+MSG_UPLOAD_REMIND = "Please attach a file, or type *Skip* to continue without one."
+ATTACHMENT_NOTE = "<b> ATTACHMENT : </b><br>---------------------<br>"
 MSG_TICKET_FAILED = "Something went wrong in creating your request."
 MSG_RETRY_QUESTION = "Would you like me to try again? Reply *Yes* to try again or *No* to stop."
 MSG_TICKET_GIVE_UP = ("I'm sorry, I wasn't able to create your request. Please try again later or contact our team "
@@ -70,11 +89,6 @@ def msg_thanks(name: str, ticket_id: int, email: str) -> str:
 # ============================================================================================
 # The payload (pure functions)
 # ============================================================================================
-def esc(value: Any) -> str:
-    """HTML-escape anything the customer typed."""
-    return html.escape(str(value), quote=False)
-
-
 def _text(value: Any, default: str) -> str:
     return str(value).strip() if value is not None and str(value).strip() else default
 
@@ -161,7 +175,7 @@ def build_ticket_payload(session: dict[str, Any], entities: dict[str, Any], sett
         "comment": {"html_body": build_description(session, entities, request_date)},
         "requester": {"name": _text(pii.get("name"), "Guest"), "email": _text(pii.get("emailId"), "guest@onespaworld.com")},
         "ticket_form_id": settings.form_id, "brand_id": settings.brand_id, "group_id": settings.group_id,
-        "priority": PRIORITY, "tags": list(settings.tags), "external_id": external_id,
+        "priority": PRIORITY, "tags": [*settings.tags, *(t for t in session.get("documentFailTags", []) if t not in settings.tags)], "external_id": external_id,
         "custom_fields": [{"id": field_id, "value": value} for field_id, value in fields if value != ""],
     }}
 
@@ -197,16 +211,61 @@ class AdditionalInfo(QuestionNode):
         await self._continue(ctx, turn, st)
 
 
+class UploadFiles(QuestionNode):
+    """The end-of-cruise statement (optional). Files are scanned and staged by the attachment service."""
+
+    def __init__(self, deps: Deps, next_id: str):
+        super().__init__(PD_ASK_UPLOAD, deps, next_id)
+
+    async def _retry(self, ctx: Any, turn: Turn, st: PurchaseDetailsState, message: str) -> None:
+        if st.count(st.failures, "upload") >= MAX_UPLOAD_ATTEMPTS:
+            turn.say(MSG_CONTINUE_WITHOUT)
+            turn.session["zd_tokens_combined"] = []
+            await self._continue(ctx, turn, st)
+            return
+        await self._ask(ctx, turn, st, message, MSG_UPLOAD)
+
+    @handler
+    async def run(self, turn: Turn, ctx: WorkflowContext[Turn, Turn]) -> None:
+        st, s = PurchaseDetailsState.load(turn.session), turn.session
+        if not turn.resuming:
+            await self._ask(ctx, turn, st, MSG_START, MSG_UPLOAD)
+            return
+        turn.resuming = False
+        if not turn.attachments and not turn.attachments_unusable:
+            if is_cancel_request(turn.text):
+                await self._cancel(ctx, turn, st)
+                return
+            if not (says_skip(turn.text) or says_finished(turn.text) or turn.text.strip(" .!").lower() in ("nothing", "none")) \
+                    and st.count(st.failures, "upload_text") < 2:
+                await self._ask(ctx, turn, st, MSG_UPLOAD_REMIND)           # a reply that is neither a file nor "skip"
+                return
+            s["zd_tokens_combined"] = []
+            await self._continue(ctx, turn, st)
+            return
+        uploader = self._deps.attachments
+        try:
+            if not turn.attachments or uploader is None:
+                raise AttachmentError("no usable file, or the attachment service is not configured")
+            session_id = (turn.save_keys or ["unknown"])[0]
+            s["zd_tokens_combined"] = await uploader.upload(turn.attachments, session_id,
+                                                            str((s.get("piiEntities") or {}).get("emailId") or ""))
+        except AttachmentBlocked as exc:
+            log.warning("attachment blocked by the scan: %s", exc.kind)
+            await self._retry(ctx, turn, st, MSG_UPLOAD_FILETYPE if exc.kind == "filetype" else MSG_UPLOAD_MALWARE)
+            return
+        except AttachmentError as exc:
+            log.error("attachment upload failed: %s", exc)
+            await self._retry(ctx, turn, st, MSG_UPLOAD_ERROR)
+            return
+        await self._continue(ctx, turn, st)
+
+
 class CreateTicket(QuestionNode):
     """Creates the ticket, adds the private transcript, thanks the customer. On failure offers a retry."""
 
     def __init__(self, deps: Deps):
-        super().__init__(PD_CREATE_TICKET, deps, "")
-
-    async def _thank(self, ctx: Any, turn: Turn) -> None:
-        pii = turn.session.get("piiEntities") or {}
-        turn.say(msg_thanks(_text(pii.get("name"), "there"), turn.session["TicketId"], _text(pii.get("emailId"), "your email")))
-        await finish(ctx, turn)
+        super().__init__(PD_CREATE_TICKET, deps, PD_FINALISE)
 
     async def _failed(self, ctx: Any, turn: Turn, st: PurchaseDetailsState) -> None:
         if st.count(st.failures, "ticket") >= MAX_TICKET_ATTEMPTS:
@@ -221,7 +280,7 @@ class CreateTicket(QuestionNode):
     async def run(self, turn: Turn, ctx: WorkflowContext[Turn, Turn]) -> None:
         st, s = PurchaseDetailsState.load(turn.session), turn.session
         if s.get("TicketId"):                                   # never create a second ticket for the same request
-            await self._thank(ctx, turn)
+            await self._continue(ctx, turn, st)
             return
         if turn.resuming:                                       # we offered a retry
             turn.resuming = False
@@ -239,6 +298,7 @@ class CreateTicket(QuestionNode):
             log.error("Zendesk is not configured; cannot create the ticket")
             await self._failed(ctx, turn, st)
             return
+        apply_validation(s)                                     # which documents can be requested; adds failure tags
         external_id = s.setdefault("ticketExternalId", uuid.uuid4().hex)
         try:
             ticket_id = await zendesk.find_by_external_id(external_id) if st.failures.get("ticket") else None
@@ -257,22 +317,78 @@ class CreateTicket(QuestionNode):
         except ZendeskError as exc:                             # the ticket exists; the transcript is a bonus
             s["privateNoteFailed"] = True
             log.warning("private note for ticket %s failed: %s", ticket_id, exc)
-        await self._thank(ctx, turn)
+        await self._continue(ctx, turn, st)
+
+
+class FinaliseRequest(Executor):
+    """After the ticket: the attachment note, the two document requests, then thank the customer.
+
+    Nothing here can undo the ticket: a failed note or document is recorded as a private note on the ticket (or logged)
+    and the customer is still thanked, as in Kore.
+    """
+
+    def __init__(self, deps: Deps):
+        super().__init__(id=PD_FINALISE)
+        self._deps = deps
+
+    async def _note(self, ticket_id: int, html_body: str, uploads: list[str] | None = None) -> None:
+        try:
+            await self._deps.zendesk.add_private_note(ticket_id, html_body, uploads)
+        except (ZendeskError, AttributeError) as exc:
+            log.warning("private note for ticket %s failed: %s", ticket_id, exc)
+
+    async def _request(self, turn: Turn, kind: str, create: Any, payload: dict[str, Any]) -> None:
+        status_key = f"{kind}DocumentStatus"
+        try:
+            await create(payload)
+            turn.session[status_key] = "created"
+        except DocumentError as exc:
+            log.error("%s document request failed: %s", kind, exc)
+            turn.session[status_key] = "failed"
+            await self._note(turn.session["TicketId"], error_note(kind, exc.status, exc.detail))
+
+    @handler
+    async def run(self, turn: Turn, ctx: WorkflowContext[Turn, Turn]) -> None:
+        s = turn.session
+        ticket_id = s["TicketId"]
+        if s.get("zd_tokens_combined"):
+            await self._note(ticket_id, ATTACHMENT_NOTE, s["zd_tokens_combined"])
+        result = validate_documents(s)
+        for note in validation_notes(result):
+            await self._note(ticket_id, note)
+        documents = self._deps.documents
+        for kind, ok, make, name in (("returns", result.returns_ok, build_returns_payload, "create_returns_document"),
+                                     ("transactions", result.transactions_ok, build_transactions_payload,
+                                      "create_transactions_document")):
+            if not ok:
+                s[f"{kind}DocumentStatus"] = "not_requested"
+            elif documents is None:
+                log.error("document API is not configured; no %s document requested", kind)
+                s[f"{kind}DocumentStatus"] = "skipped"
+            else:
+                await self._request(turn, kind, getattr(documents, name), make(s, ticket_id))
+        pii = s.get("piiEntities") or {}
+        turn.say(msg_thanks(_text(pii.get("name"), "there"), ticket_id, _text(pii.get("emailId"), "your email")))
+        await finish(ctx, turn)
 
 
 # ============================================================================================
 # Wiring
 # ============================================================================================
 class TicketNodes:
-    def __init__(self, start: Executor, last: Executor, pause_nodes: list[Executor], edges: list[tuple[Executor, Executor]]):
-        self.start, self.last, self.pause_nodes, self.edges = start, last, pause_nodes, edges
+    def __init__(self, start: Executor, last: Executor, pause_nodes: list[Executor], outputs: list[Executor],
+                 edges: list[tuple[Executor, Executor]]):
+        self.start, self.last, self.pause_nodes, self.outputs, self.edges = start, last, pause_nodes, outputs, edges
 
 
 def build_ticket_nodes(deps: Deps, cancel: Executor) -> TicketNodes:
-    additional = AdditionalInfo(deps, PD_CREATE_TICKET)
+    additional = AdditionalInfo(deps, PD_ASK_UPLOAD)
+    upload = UploadFiles(deps, PD_CREATE_TICKET)
     create = CreateTicket(deps)
-    edges = [(additional, create), (additional, cancel)]
-    return TicketNodes(start=additional, last=create, pause_nodes=[additional, create], edges=edges)
+    finalise = FinaliseRequest(deps)
+    edges = [(additional, upload), (upload, create), (create, finalise), (additional, cancel), (upload, cancel)]
+    pauses = [additional, upload, create]
+    return TicketNodes(start=additional, last=finalise, pause_nodes=pauses, outputs=[*pauses, finalise], edges=edges)
 
 
 def connect_ticket_nodes(builder: Any, nodes: TicketNodes) -> None:

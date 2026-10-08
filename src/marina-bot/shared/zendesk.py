@@ -103,7 +103,7 @@ class ZendeskApi(Protocol):
     ticket_settings: TicketSettings
 
     async def create_ticket(self, payload: dict[str, Any]) -> int: ...
-    async def add_private_note(self, ticket_id: int, html_body: str) -> None: ...
+    async def add_private_note(self, ticket_id: int, html_body: str, uploads: list[str] | None = None) -> None: ...
     async def find_by_external_id(self, external_id: str) -> int | None: ...
 
 
@@ -137,9 +137,11 @@ class ZendeskClient:
         except (TypeError, KeyError, ValueError) as exc:
             raise ZendeskError("Zendesk created a ticket but the reply had no ticket id") from exc
 
-    async def add_private_note(self, ticket_id: int, html_body: str) -> None:
-        await self._request("PUT", f"/api/v2/tickets/{int(ticket_id)}.json",
-                            json={"ticket": {"comment": {"html_body": html_body, "public": False}}})
+    async def add_private_note(self, ticket_id: int, html_body: str, uploads: list[str] | None = None) -> None:
+        comment: dict[str, Any] = {"html_body": html_body, "public": False}
+        if uploads:
+            comment["uploads"] = uploads                      # tokens from the attachment service
+        await self._request("PUT", f"/api/v2/tickets/{int(ticket_id)}.json", json={"ticket": {"comment": comment}})
 
     async def find_by_external_id(self, external_id: str) -> int | None:
         body = await self._request("GET", "/api/v2/tickets.json", params={"external_id": external_id})

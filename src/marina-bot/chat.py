@@ -3,6 +3,7 @@
 Usage:  python3 chat.py            (server must be running on :8088)
 Chains turns with previous_response_id, so the bot's saved dialog state follows the conversation.
 Type /new to start a fresh conversation, /quit to exit.
+Type /attach <https-url> to send a file link with your next message (the attachment service downloads it).
 """
 
 import json
@@ -11,8 +12,10 @@ import urllib.request
 URL = "http://localhost:8088/responses"
 
 
-def ask(text: str, previous: str | None, session: str | None) -> tuple[str, str, str | None, str | None]:
-    body = {"input": text, "stream": False}
+def ask(text: str, previous: str | None, session: str | None,
+        files: list[str] | None = None) -> tuple[str, str, str | None, str | None]:
+    content = [{"type": "input_text", "text": text}] + [{"type": "input_file", "file_url": u} for u in files or []]
+    body = {"input": [{"role": "user", "content": content}] if files else text, "stream": False}
     if previous:
         body["previous_response_id"] = previous
     if session:
@@ -29,7 +32,8 @@ def ask(text: str, previous: str | None, session: str | None) -> tuple[str, str,
 
 def main() -> None:
     previous = session = None
-    print("Marina bot (local). /new = new conversation, /quit = exit\n")
+    files: list[str] = []
+    print("Marina bot (local). /new = new conversation, /attach <url> = attach a file, /quit = exit\n")
     while True:
         try:
             text = input("you> ").strip()
@@ -37,13 +41,19 @@ def main() -> None:
             break
         if text == "/quit":
             break
+        if text.startswith("/attach "):
+            files.append(text.split(None, 1)[1].strip())
+            print(f"-- {len(files)} file(s) will be sent with your next message --")
+            continue
         if text == "/new":
             previous = session = None
+            files = []
             print("-- new conversation --")
             continue
-        if not text:
+        if not text and not files:
             continue
-        reply, rid, err, sid = ask(text, previous, session)
+        reply, rid, err, sid = ask(text or "(file)", previous, session, files)
+        files = []
         if err:
             print(f"[error] {err}")
             continue
