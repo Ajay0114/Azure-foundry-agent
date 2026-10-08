@@ -15,13 +15,15 @@ the ticket and document-request steps will need), see [CODEBASE_GUIDE.md](CODEBA
 
 | Done | Not done yet |
 |---|---|
-| Intake: greeting, name, email with confirmation and retry | Spa-record name, product details, product count, purchase date, cabin and return-details agents |
+| Intake: greeting, name, email with confirmation and retry | Booking number and card nodes, file upload and scan |
 | Entity extraction from the first message (Kore prompt, verbatim) | Validation layer |
-| Vessel lookup agent on the real OSW vessel API | Document creation, Zendesk ticket and private notes, file scan and upload |
-| Cruise dates: parser, voyage API validation, nearest-voyage confirmation | Error handling, cancel and feedback paths, clearing variables between dialogs |
-| Terminal chat client for local runs | Deployment to Foundry, a production state store, automated tests |
+| Vessel lookup agent on the real OSW vessel API | Document creation, Zendesk ticket and private notes |
+| Cruise dates: parser, voyage API validation, nearest-voyage confirmation | Feedback path, clearing variables between dialogs |
+| Purchase details: purchaser (spa record) name, cabin number, purchase date, delivery type, return reason, country, phone number, cancel | Deployment to Foundry, a production state store, automated tests |
+| Product count and product details with a read-back confirmation, saved in the shape the ticket needs | |
+| Terminal chat client for local runs | |
 
-About 14 of the dialog's 92 Kore nodes are ported. `pr_next` in the flow below is a placeholder that stands in for
+About 40 of the dialog's 92 Kore nodes are ported. `pr_next` in the flow below is a placeholder that stands in for
 the rest.
 
 ## Quick start
@@ -73,18 +75,24 @@ python3 chat.py                        # in a second terminal: talk to it (/new,
     │       ├── intake_scripts.py   Script nodes: remember the first message, clean the extraction output
     │       ├── vessel.py           Vessel agent: pre/post-processing, prompt, lookup tool, failure cap
     │       ├── cruise_dates.py     Cruise start/end date collection and voyage validation
+    │       ├── purchase_details.py Purchaser name, cabin, purchase date, delivery type, return reason, country, phone, cancel
+    │       ├── product_details.py  Product count, product list (slots and questions), confirmation, saving for the ticket
+    │       ├── return_extraction.py  Reads the second extraction (cabin, date, phone, country, products) into the notes
     │       └── prompts/            Prompt text copied from Kore, one .md per prompt node
     ├── shared/                 Building blocks used by every dialog
+    │   ├── cancel.py               Recognises "cancel / stop this" at any question
     │   ├── flow.py                 Node types (script, message, prompt, question, yes/no) and routing helpers
     │   ├── agent_node.py           The "model with tools" node and its Foundry runner
     │   ├── dates.py                Deterministic date parser and date rules
     │   ├── llm_dates.py            Model fallback for dates the parser cannot read (typed structured output)
+    │   ├── llm_products.py         Model reader for one reply in the product questions (typed structured output)
+    │   ├── countries.py            Country names and aliases ("UK" becomes "United Kingdom")
     │   ├── osw.py                  Real OneSpaWorld vessel and voyage API client (OAuth, search, nearest voyage)
     │   ├── deps.py                 One bundle of outside connections (model, agent runner, OSW, clock)
     │   ├── state_store.py          Saves and loads conversation state between messages (JSON files)
     │   ├── session.py              DialogContext: the session/entities dictionaries, Kore's key names
     │   ├── prompts.py              Fills {{placeholders}} in prompt files
-    │   └── validators.py           Name and email parsers
+    │   └── validators.py           Name, email, purchaser name, cabin, phone, delivery type, return reason, quantity and condition parsers
 ```
 
 ## How a message is processed
@@ -117,7 +125,7 @@ main.py ── parse_response: the message text + which saved state to load and 
 
 ## The Product Return flow
 
-Node ids are in `workflow.py` and `cruise_dates.py`. The right-hand column is the Kore node each one replaces.
+Node ids are in `workflow.py`, `cruise_dates.py`, `purchase_details.py` and `product_details.py`. The right-hand column is the Kore node each one replaces.
 
 | Node id | Kind | What it does | Kore node |
 |---|---|---|---|
@@ -133,6 +141,23 @@ Node ids are in `workflow.py` and `cruise_dates.py`. The right-hand column is th
 | `pr_vessel_agent` | agent | Finds the ship (see below) | `HD_VesselLookupAgent` |
 | `pr_cruise_entities` | script | Copies ship details to the long-lived `usr_*` notes | `PC_Cruise_Entities` |
 | `cd_*` | dates | Cruise start and end dates (see below) | `HD_CruiseDateOrchestrator`, `PC_CruiseDate_Entities` |
+| `pd_vars` | script | Starts the stage: clears earlier purchase answers, sets `customerName` and `customerEmail` | `PC_HomeDelivery_Script_Variables` |
+| `pd_intro`, `pd_ask_spa_name` | message, question | Intro, then "What is the name of the purchaser?" | `PC_HomeDelivery_Agent_SpaRecordName` |
+| `pd_extract`, `pd_save_extraction` | prompt, script | Model reads cabin, purchase date, phone, country and products from the first message (Kore prompt, verbatim); code validates and stores them | `PC_HomeDelivery_PromptNode`, `…_SaveEntities` |
+| `pd_ask_cabin` | question | Cabin number(s), skipped if already known | `PC_Home_Delivery_Agent_CabinNumber` |
+| `pd_policy_info` | message | 60-day return policy note | - |
+| `pd_set_request_date` | script | Stores today's date as `requestedDate` | `PC_HomeDelivery_SetRequestDate` |
+| `pd_ask_purchase_date` | question | Purchase date, checked against the cruise dates | `PC_HomeDelivery_Agent_PurchasedDate` |
+| `pd_ask_delivery` | question | "Bought on the ship, or a Home Delivery order?" | `PC_HomeDelivery_Entity_DeliveryType` |
+| `pd_ask_reason` | question | The five return reasons, answered by number, title or keyword; maps each to its Zendesk and API values | `PC_HomeDelivery_Entity_IssueReasonButtons`, `…_IssueResonButtonsValidations` |
+| `pd_ask_reason_text` | question | Only for "Other": "Please briefly describe the reason" | `PC_HomeDelivery_Entity_Reason` |
+| `pd_ask_country` | question | Country, normalised ("UK" becomes "United Kingdom"); skipped if known | `PC_HomeDelivery_Agent2_ReturnDetails` |
+| `pd_ask_phone` | question | Phone number, skipped if already known | `PC_HomeDelivery_Entity_PhoneNumber` |
+| `pd_cancel` | script | Ends the dialog when the customer asks to cancel at any question | `Cancel_Mid_Workflow` |
+| `pd_ask_product_count` | question | "How many items in total?" A number is read directly; a list of products is added up by the model | `PC_HomeDelivery_Agent_ProductCount`, `…_Script_ProductCount` |
+| `pd_ask_products` | question, loops | Name, quantity and condition of each product (and the expected product for a wrong item) until the count is reached | `PC_HomeDelivery_Agent_ProductDetails` |
+| `pd_confirm_products` | yes/no | Reads the list back; No starts the list again | Kore asks to confirm but never reads the answer |
+| `pd_reset_products`, `pd_save_products` | script | Clear the list / build the ticket list (`productsToReturn`, summary, outcome) | `PC_HomeDelivery_Script_SavingAgentData` |
 | `pr_next` | placeholder | Prints what was captured; stands in for the unported nodes | - |
 
 ### Vessel lookup (`vessel.py`, `pr_vessel_agent`)
@@ -170,14 +195,59 @@ cd_start ──► ⏸ cd_ask_start ──► cd_validate ──┬─ exact voy
 - **Rules**: a future start date is rejected; an end date before the start is rejected; "I don't know" skips a field; after
   three unreadable replies a field is given up; an API outage logs the error and the bot asks for the end date instead.
 
+### Purchase details (`purchase_details.py`)
+
+Every question is its own pause point, and every one accepts a cancel request.
+
+- **Purchaser name.** One to six words of letters (hyphens and apostrophes allowed). Two names joined by "or" or "and" are
+  not accepted; the bot asks which one. "I don't know" stores `Not provided`; three invalid replies continue without it.
+- **Second extraction.** One model call over the first message. Anything it finds is validated by code and not asked again;
+  a field the customer said they do not know is not asked either.
+- **Cabin number.** Letters and digits with at least one digit (`4201`, `A9202`, `TC03`), several allowed. Two cabins joined
+  by a symbol (`294@TC03`) get Kore's "separate with commas" message. Asked twice, then the bot continues without it.
+- **Purchase date.** Read by `shared/dates.py`. A missing year or day is asked for on its own; several dates are asked to be
+  narrowed to one. Future dates and dates outside the cruise are rejected with the cruise dates shown. After four tries, or
+  when a rejected date is repeated, it is recorded as unknown. `isWithinReturnPolicyPeriod` is true up to 60 days.
+- **Delivery type.** "Onboard Purchase" or "Home Delivery", by number, Kore's wording or similar phrases ("bought on the
+  ship", "delivered to my house"). A reply that fits both or neither is asked again; after three tries it is `Not Provided`.
+- **Return reason.** Kore's five buttons are shown as a numbered list. Answer by number, title or a clear keyword
+  ("broken", "allergic", "billed twice"); a reply that fits two reasons is asked again. After three tries it counts as
+  Other. Other asks for a short description (`otherReturnReason`). Stored: `reasonDisplay`, `returnReason` (Zendesk value),
+  `returnReasonMapped` (document API value).
+- **Country.** Matched against a country list with aliases; asked once more with an explanation if the customer says they
+  do not know, then accepted as unknown. Three unrecognised replies continue without it.
+- **Phone number.** 7 to 15 digits; "I don't have one" is accepted. Three invalid replies continue without it.
+
+### Product count and product details (`product_details.py`)
+
+Kore lets the model run this conversation and then repairs its mistakes with a long script. Here the model only **reads
+one reply** (`shared/llm_products.py`, typed output: name, quantity, condition, expected product, "that's all") and code
+decides everything else.
+
+- **Count.** A bare number or number word ("3", "two") is read without the model. A list ("2 gels and 2 creams") is added
+  up. Names without quantities are not guessed: the bot asks for the total. "I don't know" is accepted.
+- **Slots.** Each product has a name, quantity, condition and, for a wrong item, the expected product. Kore's questions are
+  asked in Kore's order for the first thing missing. A different product name always gets its own slot, so a product the
+  customer named is never dropped or overwritten. "1 new and 1 used cleanser" makes two slots. "They are all new" fills
+  every condition still empty.
+- **Conditions** are `new`, `used`, `damaged` or `wrong product`, mapped from Kore's synonym lists. A bare quantity or a
+  condition word is read by code and never reaches the model.
+- **Finishing.** The list ends when the quantities reach the count. If the count is unknown, or the customer says "that's
+  all" early, an incomplete product is asked about once and then left out. Over the count, everything is kept and flagged.
+  Five replies with nothing usable end the step with what exists.
+- **Confirmation.** The list is read back and a yes/no is asked. Kore asks for confirmation but never reads the answer.
+- **Saved** (`pd_save_products`, Kore's `SavingAgentData`): `productsToReturn` (name, quantity, condition code 1 or 2,
+  expected product), `all_products_summary`, `collectedUnits`, `countMismatch` and `collectionOutcome` (`clean`,
+  `partial_review` or `nothing_submittable`) for the ticket step.
+
 ## Conversation state and variables
 
 State has two dictionaries, with Kore's names:
 
 | Dictionary | Kore equivalent | Holds |
 |---|---|---|
-| `session` | `context.session.BotUserSession` | Which dialog is active, the paused step (`dialog_step`), the first message, history, vessel and date results, private copies (`piiEntities`), `cruiseDates`, `usr_*` results |
-| `entities` | `context.entities` | Values collected in the dialog: name, email, ship, vessel id, start and end date |
+| `session` | `context.session.BotUserSession` | Which dialog is active, the paused step (`dialog_step`), the first message, history, vessel and date results, private copies (`piiEntities`), `cruiseDates`, `purchaseDetails`, `usr_*` results, purchase answers (`spa_record_name`, `CabinNumber`, `PurchasedDate`, `purchaseDateAPI`, `isWithinReturnPolicyPeriod`, `requestedDate`, `products`) |
+| `entities` | `context.entities` | Values collected in the dialog: name, email, ship, vessel id, start and end date, `SpaRecordName`, `CabinNumber`, `PurchasedDate`, `Country`, `ProductCount` |
 
 Per message: `turn_entry` loads the state, nodes read and edit the dictionaries in place, and `persist` saves them once at the
 end (so a failed turn saves nothing). State lives in one JSON file per key under `MARINA_STATE_DIR`. The load key is the
@@ -195,7 +265,7 @@ end (so a failed turn saves nothing). State lives in one JSON file per key under
 - **Node types** (`shared/flow.py`, `shared/agent_node.py`): `ScriptNode`, `MessageNode`, `PromptNode`, `SlotNode` (ask and
   validate, retry with an error text), `ConfirmNode` (yes/no) and `AgentNode` (model with tools).
 - **Model use.** Dialog control is ordinary code. The model reads the first message, drives the vessel agent through tools,
-  and acts as a fallback for unusual date wording. Its output is always validated by code.
+  reads the purchase details from the first message, and acts as a fallback for unusual date wording. Its output is always validated by code.
 - **The SDK's built-in pause and resume (`request_info`) is not used.** It surfaces a pause as a tool call that the client
   must answer with a tool result, which does not suit a plain-text chat channel.
 
@@ -220,7 +290,9 @@ end (so a failed turn saves nothing). State lives in one JSON file per key under
   Foundry state store before production.
 - **No cleanup between dialogs.** Ending a dialog clears only `active_dialog` and `dialog_step`. Vessel flags and `vessel_id`
   persist, so a second return in the same conversation would skip the ship question. Kore's `ClearData` step is not ported.
-- **Simplified checks.** Name and email validation are plain rules standing in for Kore's built-in entity types. The empathy
+- **Simplified checks.** Name, email, purchaser name, cabin, phone, delivery type and return reason validation are plain
+  rules standing in for Kore's built-in entity types and agent-node prompts. The delivery-type and return-reason keyword
+  lists are my own; a reply that fits none gets a "please choose" message rather than a guess. The empathy
   check node has no configuration in the Kore export and was skipped.
 - **Models.** Prompts run on the deployed model (for example `gpt-5.4-mini`), not Kore's `gpt-5.1`, and Kore's temperature and
   token settings are not applied.

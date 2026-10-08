@@ -13,12 +13,12 @@ All paths are under `src/marina-bot/`.
   and saved at the end** of every message.
 - A step that needs an answer asks its question and records its own id (`session["dialog_step"]`). The next message resumes
   at exactly that step.
-- Dialog control is ordinary Python. The **AI model** is used in four places (section 2). **Real APIs** are called from one
+- Dialog control is ordinary Python. The **AI model** is used in six places (section 2). **Real APIs** are called from one
   file (section 3).
 
 ## 2. Where the AI model is used
 
-Four places, all using the **same Foundry model deployment** through one client built in `main.py`.
+Six places, all using the **same Foundry model deployment** through one client built in `main.py`.
 
 | # | Where | What it does | Style |
 |---|---|---|---|
@@ -26,9 +26,11 @@ Four places, all using the **same Foundry model deployment** through one client 
 | 2 | `shared/flow.py`, `PromptNode`, used by the `pr_extract` step | Pulls ship, cruise line and dates out of the **first message**, using `prompts/extract_cruise_entities.md` | One-shot call, JSON text |
 | 3 | `shared/agent_node.py`, `FoundryAgentRunner`, used by the `pr_vessel_agent` step | The vessel agent: calls the ship-lookup tool and asks the customer questions across several messages. Prompts: `prompts/vessel_identification.md`, `prompts/vessel_step0.md` | Model with tools |
 | 4 | `shared/llm_dates.py`, `FoundryDateReader` | Fallback for dates the code parser cannot read. Returns day, month and year as separate typed fields; code validates them | Structured output |
+| 5 | `shared/flow.py`, `PromptNode`, used by the `pd_extract` step | Pulls cabin number, purchase date, phone, country, product count and products out of the **first message**, using `prompts/extract_return_details.md`. `return_extraction.py` validates every value | One-shot call, JSON text |
+| 6 | `shared/llm_products.py`, `FoundryProductReader`, used by `pd_ask_product_count` and `pd_ask_products` | Reads **one reply** about the products: names, quantities, conditions, the expected product, "that's all". It never decides what to ask next; `product_details.py` does. A bare number or a condition word is read by code without calling it | Structured output |
 
-`main.py` builds the three helpers from one `FoundryChatClient`: `make_prompt_runner` (for 1 and 2), `FoundryAgentRunner`
-(for 3) and `FoundryDateReader` (for 4). Calls 1 and 2 are stateless one-shot calls; the conversation history is put
+`main.py` builds the four helpers from one `FoundryChatClient`: `make_prompt_runner` (for 1, 2 and 5), `FoundryAgentRunner`
+(for 3), `FoundryDateReader` (for 4) and `FoundryProductReader` (for 6). Calls 1, 2 and 5 are stateless one-shot calls; the conversation history is put
 into the prompt text where needed.
 
 ## 3. Where the APIs are
@@ -70,22 +72,28 @@ external store is the state file (section 5).
 | `intake_scripts.py` | Plain-Python clerk work: remember the first message once, and clean the extraction output (ignore vague words such as "the ship", normalise dates, keep a date with no year as typed so the date step can ask for the year) |
 | `vessel.py` | The vessel agent: a pre-step that syncs the notes, the prompt builder, the lookup tool (calls OSW; returns nothing, one vessel, or a list), and a post-step that sets the vessel id, name and cruise line, counts failed lookups, and after the second miss accepts the customer's value. Also `save_cruise_entities`, which copies the results into the long-lived `usr_*` notes |
 | `cruise_dates.py` | The date nodes (`cd_start`, `cd_ask_start`, `cd_validate`, `cd_confirm_nearest`, `cd_ask_end`, `cd_finish`) and a typed `CruiseDatesState` stored under `session["cruiseDates"]`. `cd_finish` publishes `start_date`, `end_date`, `usr_start_date`, `usr_end_date` and `dateCompleted` |
+| `purchase_details.py` | The purchase-details nodes (`pd_*`): purchaser name, second extraction, cabin number, policy note, purchase date, delivery type, return reason (and the "Other" description), phone number and cancel. A typed `PurchaseDetailsState` (ask and failure counters, partial dates, last rejected date) is stored under `session["purchaseDetails"]`. `start_purchase_details` clears the previous answers of this stage so a second return starts clean |
+| `product_details.py` | Product count and product details (`pd_ask_product_count`, `pd_ask_products`, `pd_confirm_products`, `pd_reset_products`, `pd_save_products`). The decision logic is a set of small pure functions (`next_question`, `apply_reading`, `is_complete`) that fill product slots from what the model read; `save_products` builds `productsToReturn` in the shape Kore's ticket script expects |
+| `return_extraction.py` | Port of Kore's `SaveEntities` script: validates the second extraction's output and stores cabin, raw purchase date, country, phone, product count, products, and "customer doesn't know" flags |
 | `prompts/` | The prompt texts copied from Kore, one `.md` per prompt, with `{{placeholders}}` |
 
 ### `shared/`: building blocks used by every dialog
 
 | File | What it does |
 |---|---|
-| `flow.py` | The node types: `ScriptNode`, `MessageNode`, `PromptNode` (model call #2), `SlotNode` (ask and validate, retry with an error text), `ConfirmNode` (yes/no). The routing helpers `goto`, `pause` and `finish`. Every edge in the graph is gated on `turn.route == target id` |
+| `cancel.py` | `is_cancel_request`: recognises "cancel", "stop this", "I don't want to continue" and similar, but not "cancel my subscription". Used by every purchase-details question |
+| `flow.py` | The node types: `ScriptNode`, `MessageNode`, `PromptNode` (model calls #2 and #5), `SlotNode` (ask and validate, retry with an error text), `ConfirmNode` (yes/no). The routing helpers `goto`, `pause` and `finish`. Every edge in the graph is gated on `turn.route == target id` |
 | `agent_node.py` | `AgentNode`: pre-step, model call with tools, then "done, so continue" or "say the model's question and pause". `FoundryAgentRunner` is model call #3. The `end_orchestration` tool is checked when it is called, not when it is built |
 | `dates.py` | The date parser. Formats, ranges, partial dates, bare years, skip phrases, yes/no, impossible dates, and the "not in the future" rule (one day of tolerance). Never calls a model |
 | `llm_dates.py` | Model call #4 and the validation of its typed answer |
+| `llm_products.py` | Model call #6 and the validation of its typed answer (`ProductReading`) |
+| `countries.py` | Country names and aliases; turns "I live in the UK" into "United Kingdom" |
 | `osw.py` | The OneSpaWorld API client and all response parsing (section 3) |
-| `deps.py` | One bundle of outside connections: the one-shot model call, the agent runner, the OSW client, the clock, and the optional date reader |
+| `deps.py` | One bundle of outside connections: the one-shot model call, the agent runner, the OSW client, the clock, and the optional date and product readers |
 | `state_store.py` | Loads and saves the conversation state as JSON files (section 5) |
 | `session.py` | `DialogContext`: the `session` and `entities` dictionaries, using Kore's key names |
 | `prompts.py` | Fills `{{placeholders}}` in prompt files by plain text replacement (the prompts contain literal JSON braces, so Python formatting cannot be used) |
-| `validators.py` | Name and email parsers |
+| `validators.py` | Name, email, purchaser name, cabin number, phone, delivery type, return reason (the five reasons with their Zendesk and API values), quantity, condition and "that's all" parsers |
 
 ## 5. Where the session variables are stored
 
@@ -112,6 +120,18 @@ snapshot file per message. A failed message saves nothing, so the next try start
 | `entities` and `session`: `ship_name`, `cruise_line`, `vessel_id`, plus the vessel counters and flags (`vesselLookupFailCount`, `lastVesselAttempt`, `lastCountedVesselValue`, `vesselSkippedFields`, `vesselForceContinue`, `vesselLookupInvoked`, `vesselCompleted`, `conversationState`) | `process_extracted_entities` (intake) and the vessel agent |
 | `session.usr_ship_name`, `usr_cruise_line`, `usr_vessel_id` | `pr_cruise_entities` |
 | `session.cruiseDates`, `usr_start_date`, `usr_end_date`, `dateCompleted`; `entities.start_date`, `end_date` | the `cd_*` nodes |
+| `session.spa_record_name`, `piiEntities.sparecordname`, `piiEntities.nameAsPerSpa`; `entities.SpaRecordName` | `pd_ask_spa_name` |
+| `session.CabinNumber` (text), `CabinNumbers` (list), `CabinNumberUnknown`; `entities.CabinNumber` | `pd_save_extraction`, `pd_ask_cabin` |
+| `session.PurchasedDate` (MM/DD/YYYY or `unknown`), `purchaseDateFormatted`, `purchaseDateAPI`, `lastEnteredDate` (ISO), `isWithinReturnPolicyPeriod`, `requestedDate`; `entities.PurchasedDate` | `pd_set_request_date`, `pd_ask_purchase_date` |
+| `session.deliveryType`; `entities.PC_HomeDelivery_Entity_DeliveryType` | `pd_ask_delivery` |
+| `session.reasonDisplay`, `returnReason` (Zendesk value), `returnReasonMapped` (document API value), `otherReturnReason`; `entities.PC_HomeDelivery_Entity_IssueReasonButtons`, `…_Reason` | `pd_ask_reason`, `pd_ask_reason_text` |
+| `session.piiEntities.phoneNumber`, `PhoneNumberUnknown` | `pd_save_extraction`, `pd_ask_phone` |
+| `session.Country`, `CountryUnknown`, `countryCompleted`; `entities.Country` | `pd_save_extraction`, `pd_ask_country` |
+| `session.ProductCount`, `ProductCountUnknown`, `productCountCompleted`; `entities.ProductCount` | `pd_save_extraction`, `pd_ask_product_count` |
+| `session.products` (name, quantity, condition, expected product), `ProductsCollected`, `remainingQuantity`, `partialReturn`, `agentNodeExitPath`; `entities.ProductsCollected`, `AllProductsCaptured` | `pd_ask_products` (first filled by `pd_save_extraction`) |
+| `session.productsToReturn`, `productsToReturnJSON`, `all_products_summary`, `collectedUnits`, `countMismatch`, `collectionOutcome`, `returnDetailsCompleted`, `productDataAnomaly` | `pd_save_products` |
+| `session.extractionStatus`, other `…Unknown` flags | `pd_save_extraction` |
+| `session.customerName`, `customerEmail`, `purchaseDetails` | `pd_vars` and the `pd_*` nodes |
 | `session.active_dialog`, `dialog_step` | the classifier, and any step that pauses |
 | `session.conversationHistoryString` (last 10 lines), `session.messages` (last 20) | `Persist` |
 
@@ -129,20 +149,20 @@ and the `DocumentCreation_Service_Returns` / `…_Transcations` payloads.
 | `usr_cruise_line`, `usr_ship_name` | Ticket custom fields and body, document request |
 | `usr_vessel_id`, `usr_start_date`, `usr_end_date` | Document request, ticket sail date |
 | `initialMessage` | Ticket body |
+| `piiEntities.phoneNumber`, `spa_record_name`, `CabinNumber` | Ticket body, document request |
+| `PurchasedDate`, `purchaseDateAPI`, `requestedDate`, `isWithinReturnPolicyPeriod` | Document request, ticket policy flag |
+| `deliveryType`, `returnReason`, `returnReasonMapped`, `otherReturnReason` | Ticket reason field and body, document request |
+| `Country`, `ProductCount` | Ticket body, document request |
+| `productsToReturn` (list), `productsToReturnJSON`, `all_products_summary`, `collectionOutcome` | Ticket body and the return document; `collectionOutcome` says whether the ticket needs review |
 
 ### Still to be collected, with the Kore step that sets each
 
 | Variable | Set by (Kore node) |
 |---|---|
-| `piiEntities.phoneNumber` | `PC_HomeDelivery_Entity_PhoneNumber` and its scripts |
 | `piiEntities.creditcard` and the card entity | `PC_HomeDelivery_Entity_CreditCardInfo`, `Script0073` |
-| `spa_record_name` (name as per spa records) | `PC_HomeDelivery_Agent_SpaRecordName` |
-| `CabinNumber` | `PC_Home_Delivery_Agent_CabinNumber` |
-| `Country`, `returnReason`, `returnReasonMapped`, `otherReturnReason` | `PC_HomeDelivery_Agent2_ReturnDetails`, `…_IssueResonButtonsValidations` |
-| `ProductCount`, `products` (name, quantity, condition, expected product), `productsToReturnString` | `PC_HomeDelivery_Agent_ProductCount`, `PC_HomeDelivery_PromptNode`, `…_ReturnDocuments` |
-| `purchaseDateAPI`, `requestedDate`, `isWithinReturnPolicyPeriod` | `PC_HomeDelivery_Agent_PurchasedDate`, `…_SetRequestDate`, `PC_HomeDelivery_ValidationScript` |
+| `productsToReturnString` (the product list as text for the return document) | `PC_HomeDelivery_Script_ReturnDocuments` |
 | `bookingNumber`, `bookingNumberLine` | `PC_HomeDelivery_Entity_BookingNumber` and its scripts |
-| Entities `PC_HomeDelivery_Entity_DeliveryType`, `…_IssueReasonButtons`, `PC_Common_Entity_AdditionalDescription` | their entity nodes |
+| Entity `PC_Common_Entity_AdditionalDescription` | its entity node |
 | **`TicketId`** | Set after the Zendesk create-ticket call; reused by the private notes and the document request |
 
 ### Settings, not session variables
