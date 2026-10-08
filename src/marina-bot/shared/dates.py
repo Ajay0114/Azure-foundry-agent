@@ -229,6 +229,11 @@ def _says_skip(lowered: str) -> bool:
     return any(re.search(rf"(?<![a-z']){re.escape(phrase)}(?![a-z'])", lowered) for phrase in SKIP_PHRASES)
 
 
+def says_skip(text: str) -> bool:
+    """True when the reply is a 'don't know / not sure / skip / no' (Kore's sentinel phrases)."""
+    return _says_skip((text or "").lower())
+
+
 def read_text(text: str) -> DateReading:
     """What did the customer say about a date? See the module docstring."""
     text = (text or "").strip()
