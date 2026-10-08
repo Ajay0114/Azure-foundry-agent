@@ -20,11 +20,12 @@ Ports this stretch of the Kore dialog (the agent nodes become plain, tested code
   PC_HomeDelivery_Entity_IssueReasonButtons
     + PC_HomeDelivery_Script_IssueResonButtonsValidations   pd_ask_reason     (pause point)
   PC_HomeDelivery_Entity_Reason                       pd_ask_reason_text     (pause point, "Other" only)
+  PC_HomeDelivery_Agent2_ReturnDetails (country)       pd_ask_country         (pause point)
   Phonenumber_Logic + PC_HomeDelivery_Entity_PhoneNumber + Script0084
                                                       pd_ask_phone           (pause point)
   Cancel_Mid_Workflow                                 pd_cancel
 
-In Kore the phone question comes after the return-details agent (country and similar), which is not ported yet.
+The product count and product details that follow are in product_details.py.
 
 Differences from Kore, on purpose:
   * the second extraction fills what it can and the customer is never asked for something they already told us
@@ -47,6 +48,7 @@ from agent_framework import Executor, WorkflowContext, handler
 from dialogs.product_return.return_extraction import EXTRACT_NODE, process_return_extraction
 from models import Turn
 from shared.cancel import MSG_CANCELLED, is_cancel_request
+from shared.countries import parse_country
 from shared.dates import MONTHS, PartialDate, is_future, read_text, says_skip
 from shared.deps import Deps
 from shared.flow import MessageNode, PromptNode, ScriptNode, connect, finish, goto, pause
@@ -71,7 +73,7 @@ PD_VARS, PD_INTRO, PD_ASK_NAME = "pd_vars", "pd_intro", "pd_ask_spa_name"
 PD_EXTRACT, PD_SAVE, PD_ASK_CABIN = "pd_extract", "pd_save_extraction", "pd_ask_cabin"
 PD_POLICY, PD_SET_DATE, PD_ASK_DATE = "pd_policy_info", "pd_set_request_date", "pd_ask_purchase_date"
 PD_ASK_DELIVERY, PD_ASK_REASON, PD_ASK_REASON_TEXT = "pd_ask_delivery", "pd_ask_reason", "pd_ask_reason_text"
-PD_ASK_PHONE, PD_CANCEL = "pd_ask_phone", "pd_cancel"
+PD_ASK_COUNTRY, PD_ASK_PHONE, PD_CANCEL = "pd_ask_country", "pd_ask_phone", "pd_cancel"
 
 
 # ============================================================================================
@@ -126,6 +128,10 @@ def msg_reason_choices() -> str:
     return MSG_REASON + "\n" + "\n".join(f"{i}. {r.title}" for i, r in enumerate(RETURN_REASONS, 1))
 
 
+MSG_COUNTRY = "Could you please share the country you are located in?"
+MSG_COUNTRY_AGAIN = "I understand — I do need your country to process the return, though. Could you share it?"
+MSG_COUNTRY_INVALID = ("I'm sorry, I did not recognize that as a country. Could you please tell me the country you are "
+                       "located in?")
 MSG_PHONE = "Please enter a phone number where we can reach you if needed."
 MSG_PHONE_INVALID = ("I apologize, I am unable to recognize the phone number you entered. "
                      "Please enter the phone number including the area code.")
@@ -141,6 +147,8 @@ class PurchaseDetailsState:
     date_partial: dict[str, Any] | None = None                  # purchase date still missing its year or day
     last_rejected: str | None = None                            # a purchase date we turned down
     date_seeded: bool = False                                   # the first-message date has been looked at
+    asked: dict[str, Any] | None = None                         # product stage: {"slot": index or None, "field": ...}
+    exit_challenged: bool = False                               # product stage: "that's all" already questioned once
 
     @classmethod
     def load(cls, session: dict[str, Any]) -> "PurchaseDetailsState":
@@ -175,12 +183,15 @@ _STAGE_SESSION_KEYS = (
     "lastEnteredDate", "isWithinReturnPolicyPeriod", "PurchasedDateUnknown", "Country", "resolvedCountry",
     "CountryUnknown", "ProductCount", "resolvedProductCount", "ProductCountUnknown", "products",
     "PhoneNumberUnknown", "extractionStatus", "requestedDate", "deliveryType", "reasonDisplay", "returnReason",
-    "returnReasonMapped", "otherReturnReason")
+    "returnReasonMapped", "otherReturnReason", "countryCompleted", "countryRetryCount", "ProductCountUnknown",
+    "productCountCompleted", "returnDetailsCompleted", "remainingQuantity", "ProductsCollected", "productsToReturn",
+    "productsToReturnJSON", "all_products_summary", "collectedUnits", "countMismatch", "collectionOutcome",
+    "partialReturn", "productDataAnomaly", "agentNodeExitPath", "productDetails")
 _STAGE_PII_KEYS = ("sparecordname", "nameAsPerSpa", "phoneNumber")
 _STAGE_ENTITY_KEYS = ("SpaRecordName", "PC_Common_2_Entity_NameAsPerSpaRecords", "CabinNumber", "CabinNumbers",
                       "PurchasedDate", "Country", "ProductCount", "PC_HomeDelivery_Entity_PhoneNumber",
                       "PC_HomeDelivery_Entity_DeliveryType", "PC_HomeDelivery_Entity_IssueReasonButtons",
-                      "PC_HomeDelivery_Entity_Reason")
+                      "PC_HomeDelivery_Entity_Reason", "ProductsCollected", "AllProductsCaptured")
 
 
 def start_purchase_details(turn: Turn) -> None:
@@ -205,7 +216,7 @@ def make_set_request_date(deps: Deps):
 # ============================================================================================
 # Question nodes
 # ============================================================================================
-class _Question(Executor):
+class QuestionNode(Executor):
     """Shared plumbing for the nodes that ask the customer something and resume on the next message."""
 
     def __init__(self, node_id: str, deps: Deps, next_id: str):
@@ -237,7 +248,7 @@ def set_purchaser_name(turn: Turn, name: str) -> None:
     turn.entities["SpaRecordName"] = name
 
 
-class PurchaserName(_Question):
+class PurchaserName(QuestionNode):
     """The name on the spa record. Accepts one name, a skip ("Not provided"), and asks again for two names."""
 
     def __init__(self, deps: Deps, next_id: str):
@@ -274,7 +285,7 @@ class PurchaserName(_Question):
         await self._continue(ctx, turn, st)
 
 
-class CabinNumber(_Question):
+class CabinNumber(QuestionNode):
     """One or more cabin numbers. Asked twice at most, with Kore's two wordings, then we move on."""
 
     def __init__(self, deps: Deps, next_id: str):
@@ -317,7 +328,7 @@ _NUMERIC_MONTH_YEAR = re.compile(r"^\s*(\d{1,2})\s*[/-]\s*((?:19|20)\d{2})\s*$")
 _DAY_ONLY = re.compile(r"^\D{0,12}(\d{1,2})(?:st|nd|rd|th)?\D{0,3}$", re.I)                         # "14", "the 14th"
 
 
-class PurchaseDate(_Question):
+class PurchaseDate(QuestionNode):
     """The purchase date: a real, past date inside the cruise. Partial dates get one targeted follow-up."""
 
     def __init__(self, deps: Deps, next_id: str):
@@ -455,7 +466,7 @@ class PurchaseDate(_Question):
 
 
 
-class DeliveryType(_Question):
+class DeliveryType(QuestionNode):
     """Onboard purchase or home delivery. Three tries, then it is recorded as "Not Provided" (Kore's default)."""
 
     def __init__(self, deps: Deps, next_id: str):
@@ -482,7 +493,7 @@ class DeliveryType(_Question):
         await self._continue(ctx, turn, st)
 
 
-class ReturnReason(_Question):
+class ReturnReason(QuestionNode):
     """One of Kore's five reasons. "Other" leads to a free-text description; three failures count as "Other"."""
 
     def __init__(self, deps: Deps, next_id: str, other_id: str):
@@ -516,7 +527,7 @@ class ReturnReason(_Question):
         await self._continue(ctx, turn, st)
 
 
-class ReturnReasonText(_Question):
+class ReturnReasonText(QuestionNode):
     """The description that goes with "Other"."""
 
     def __init__(self, deps: Deps, next_id: str):
@@ -542,11 +553,49 @@ class ReturnReasonText(_Question):
         await self._continue(ctx, turn, st)
 
 
+class CountryNode(QuestionNode):
+    """The country the customer lives in (Kore: the Agent2_ReturnDetails agent). Skipped when already known."""
+
+    def __init__(self, deps: Deps, next_id: str):
+        super().__init__(PD_ASK_COUNTRY, deps, next_id)
+
+    @handler
+    async def run(self, turn: Turn, ctx: WorkflowContext[Turn, Turn]) -> None:
+        st, s = PurchaseDetailsState.load(turn.session), turn.session
+        if is_resolved(turn.entities.get("Country")) or s.get("CountryUnknown"):
+            s["countryCompleted"] = True
+            await self._continue(ctx, turn, st)
+            return
+        if not turn.resuming:
+            await self._ask(ctx, turn, st, MSG_COUNTRY)
+            return
+        turn.resuming = False
+        if is_cancel_request(turn.text):
+            await self._cancel(ctx, turn, st)
+            return
+        country = parse_country(turn.text)
+        if country:
+            turn.entities["Country"] = s["Country"] = s["resolvedCountry"] = country
+        elif says_skip(turn.text):
+            if st.count(st.failures, "country_skip") < 2:                 # explain once why it is needed, then accept
+                await self._ask(ctx, turn, st, MSG_COUNTRY_AGAIN)
+                return
+            s["CountryUnknown"] = True
+        elif st.count(st.failures, "country") < MAX_CHOICE_ATTEMPTS:
+            await self._ask(ctx, turn, st, MSG_COUNTRY_INVALID)
+            return
+        else:
+            s["CountryUnknown"] = True
+            turn.say(MSG_CONTINUE_WITHOUT)
+        s["countryCompleted"] = True
+        await self._continue(ctx, turn, st)
+
+
 _NO_PHONE = re.compile(r"\b(?:(?:do not|don'?t|dont|doesn'?t|have no|no)\s+(?:have\s+)?(?:a\s+|any\s+)?(?:phone|number|one)\b"
                        r"|no phone)", re.I)
 
 
-class PhoneNumber(_Question):
+class PhoneNumber(QuestionNode):
     """A contact phone number, skipped when the customer already gave one (or said they have none)."""
 
     def __init__(self, deps: Deps, next_id: str):
@@ -599,6 +648,7 @@ class CancelRequest(Executor):
 class PurchaseDetailNodes:
     start: Executor
     last: Executor
+    cancel: Executor
     pause_nodes: list[Executor]           # where a turn can end and later resume
     outputs: list[Executor]               # nodes that can end a turn (pause nodes and the cancel node)
     edges: list[tuple[Executor, Executor]]
@@ -621,17 +671,18 @@ def build_purchase_detail_nodes(deps: Deps, next_id: str) -> PurchaseDetailNodes
     set_date = ScriptNode(PD_SET_DATE, make_set_request_date(deps), PD_ASK_DATE)
     purchase = PurchaseDate(deps, PD_ASK_DELIVERY)
     delivery = DeliveryType(deps, PD_ASK_REASON)
-    reason = ReturnReason(deps, PD_ASK_PHONE, PD_ASK_REASON_TEXT)
-    reason_text = ReturnReasonText(deps, PD_ASK_PHONE)
+    reason = ReturnReason(deps, PD_ASK_COUNTRY, PD_ASK_REASON_TEXT)
+    reason_text = ReturnReasonText(deps, PD_ASK_COUNTRY)
+    country = CountryNode(deps, PD_ASK_PHONE)
     phone = PhoneNumber(deps, next_id)
     cancel = CancelRequest()
 
-    pauses = [name, cabin, purchase, delivery, reason, reason_text, phone]
+    pauses = [name, cabin, purchase, delivery, reason, reason_text, country, phone]
     edges = [(vars_, intro), (intro, name), (name, extract), (extract, save), (save, cabin), (cabin, policy),
              (policy, set_date), (set_date, purchase), (purchase, delivery), (delivery, reason), (reason, reason_text),
-             (reason, phone), (reason_text, phone)]
+             (reason, country), (reason_text, country), (country, phone)]
     edges += [(node, cancel) for node in pauses]
-    return PurchaseDetailNodes(start=vars_, last=phone, pause_nodes=pauses, outputs=[*pauses, cancel], edges=edges)
+    return PurchaseDetailNodes(start=vars_, last=phone, cancel=cancel, pause_nodes=pauses, outputs=[*pauses, cancel], edges=edges)
 
 
 def connect_purchase_detail_nodes(builder: Any, nodes: PurchaseDetailNodes) -> None:

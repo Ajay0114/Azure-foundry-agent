@@ -207,3 +207,71 @@ def parse_return_reason(text: str) -> ReturnReason | None:
         return RETURN_REASONS[4]
     hits = [i for i, pattern in enumerate(_REASON_WORDS) if pattern.search(text)]
     return RETURN_REASONS[hits[0]] if len(hits) == 1 else None
+
+
+# ============================================================================================
+# Product count and product details (Kore: PC_HomeDelivery_Agent_ProductCount / _ProductDetails)
+# ============================================================================================
+_NUMBER_WORDS = {"zero": 0, "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+                 "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "couple": 2, "pair": 2}
+_NUMBER_REPLY = re.compile(r"^(?:just |only |about |around |total of |a total of )?(\d{1,3}|[a-z]+)"
+                           r"(?: (?:items?|products?|things?|pieces?|units?|in total|total))?$")
+_CONDITION_WORDS = {
+    "new": ["new", "unopened", "sealed", "unused", "never opened", "never used", "not opened", "arrived late",
+            "no longer need", "dont need", "changed my mind", "changed mind", "brand new"],
+    "used": ["used", "tried", "opened", "tested", "partially used", "used it"],
+    "damaged": ["damaged", "broken", "defective", "not working", "stopped working", "cracked", "faulty", "leaked"],
+    "wrong product": ["wrong product", "wrong item", "wrong", "not what i ordered", "received wrong", "different product",
+                      "sent wrong", "incorrect"],
+}
+_FINISHED = re.compile(r"^(?:no,? )?(?:that'?s (?:all|it|everything)|thats (?:all|it)|no more|nothing (?:else|more)|"
+                       r"nope|done|that is all|that is it|only (?:that|this|those|these)|just (?:that|this|those|these))\b[ .!]*$"
+                       r"|\b(?:no more|nothing else|that'?s all|thats all)\b", re.I)
+_FILLER_WORDS = re.compile(r"\b(?:products?|items?|units?|things?)\b", re.I)
+
+
+def parse_quantity(text: str) -> int | None:
+    """A bare quantity, 1 to 999 ("3", "two", "just 1"). Anything with other words in it is not a bare quantity."""
+    reply = " ".join((text or "").lower().replace(",", " ").split()).strip(" .!")
+    match = _NUMBER_REPLY.match(re.sub(r"^a (couple|pair)(?: of)?$", r"\1", reply))
+    if not match:
+        return None
+    word = match.group(1)
+    value = int(word) if word.isdigit() else _NUMBER_WORDS.get(word)
+    return value if value and 1 <= value <= 999 else None
+
+
+def parse_product_count(text: str) -> int | None:
+    """The total number of items, when the reply is just a number (digits or words)."""
+    return parse_quantity(text)
+
+
+def parse_condition(text: str) -> str | None:
+    """new | used | damaged | wrong product, from Kore's synonym lists. None when no word or more than one condition.
+
+    A word inside a longer phrase of another condition does not count ("never opened" is new, not used).
+    """
+    lowered = " ".join(re.sub(r"[^a-z0-9' ]", " ", (text or "").lower()).replace("'", "").split())
+    found = [(m.start(), m.end(), condition) for condition, words in _CONDITION_WORDS.items() for w in words
+             for m in re.finditer(rf"\b{re.escape(w.replace(chr(39), ''))}\b", lowered)]
+    hits = {c for s, e, c in found
+            if not any(c2 != c and s2 <= s and e <= e2 and (e2 - s2) > (e - s) for s2, e2, c2 in found)}
+    if "wrong product" in hits:
+        hits.discard("new")              # "wrong item, never opened" is still a wrong product
+    return hits.pop() if len(hits) == 1 else None
+
+
+def says_finished(text: str) -> bool:
+    """"that's all", "no more", "done": the customer has no further products to list."""
+    return bool(_FINISHED.search(" ".join((text or "").lower().split())))
+
+
+def clean_product_name(name: str | None) -> str | None:
+    """The product noun without filler words ("the cream product" -> "cream"); None when nothing real is left."""
+    cleaned = " ".join(_FILLER_WORDS.sub(" ", name or "").split()).strip(" .,;:-")
+    return cleaned if cleaned and not cleaned.isdigit() and len(cleaned) <= 120 else None
+
+
+def same_product(a: str | None, b: str | None) -> bool:
+    return bool(a and b) and " ".join(re.sub(r"[^a-z0-9 ]", " ", a.lower()).split()) == " ".join(
+        re.sub(r"[^a-z0-9 ]", " ", b.lower()).split())

@@ -8,6 +8,7 @@ from shared.agent_node import AgentRunner
 from shared.dates import utc_today
 from shared.flow import PromptRunner
 from shared.llm_dates import DateReader
+from shared.llm_products import ProductReader
 from shared.osw import OswApi
 
 
@@ -18,3 +19,4 @@ class Deps:
     osw: OswApi                # OneSpaWorld vessel + itinerary APIs
     today: Callable[[], date] = utc_today        # the clock (UTC)
     read_dates: DateReader | None = None         # model fallback for dates the parser cannot read (optional)
+    read_products: ProductReader | None = None   # model reader for the product questions (optional)

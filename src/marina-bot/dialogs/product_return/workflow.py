@@ -19,6 +19,7 @@ Ported so far (in Kore order):
    -> HD_CruiseDateOrchestrator + PC_CruiseDate_Entities   cd_* nodes, see cruise_dates.py (redesigned, not a copy)
    -> purchaser name, second extraction, cabin number, return policy note, purchase date, phone
                                                    pd_* nodes, see purchase_details.py
+   -> country, product count, product details, confirmation, save    pd_* nodes, see product_details.py
    -> ...                                          pr_next (placeholder: not ported yet)
 """
 
@@ -28,6 +29,8 @@ from agent_framework import Executor, Workflow, WorkflowBuilder, WorkflowContext
 
 from dialogs.product_return.cruise_dates import CD_START, build_cruise_date_nodes, connect_cruise_date_nodes
 from dialogs.product_return.intake_scripts import process_extracted_entities, set_initial_message
+from dialogs.product_return.product_details import (PD_ASK_PRODUCT_COUNT, build_product_nodes,
+                                                    connect_product_nodes)
 from dialogs.product_return.purchase_details import (PD_VARS, build_purchase_detail_nodes,
                                                      connect_purchase_detail_nodes)
 from dialogs.product_return.vessel import make_vessel_spec, save_cruise_entities
@@ -68,8 +71,8 @@ class ProductReturnNext(Executor):
     @handler
     async def run(self, turn: Turn, ctx: WorkflowContext[Turn, Turn]) -> None:
         captured = {k: v for k, v in turn.entities.items() if v}
-        turn.say("[POC] Purchase details step complete. Next to port: delivery type, return reason, return details "
-                 f"and the product nodes. Captured so far: {captured}")
+        turn.say("[POC] Return details step complete. Next to port: booking number, card details, file upload, "
+                 f"ticket and documents. Captured so far: {captured}\n{turn.session.get('all_products_summary', '')}")
         await finish(ctx, turn)
 
 
@@ -133,21 +136,23 @@ def build_product_return_workflow(deps: Deps) -> Workflow:
     cruise_entities = ScriptNode("pr_cruise_entities", save_cruise_entities, CD_START)
     nxt = ProductReturnNext()
     dates = build_cruise_date_nodes(deps, next_id=PD_VARS)
-    purchase = build_purchase_detail_nodes(deps, next_id="pr_next")
+    purchase = build_purchase_detail_nodes(deps, next_id=PD_ASK_PRODUCT_COUNT)
+    products = build_product_nodes(deps, next_id="pr_next", cancel=purchase.cancel)
 
     builder = WorkflowBuilder(name="product-return", start_executor=entry,
                               output_from=[name, email, confirm, vessel_agent, *dates.pause_nodes,
-                                           *purchase.outputs, nxt])
+                                           *purchase.outputs, *products.outputs, nxt])
     for src, dst in [
         (entry, initial), (entry, name), (entry, email), (entry, confirm), (entry, vessel_agent),  # new dialog / resume points
-        *[(entry, node) for node in [*dates.pause_nodes, *purchase.pause_nodes]],
+        *[(entry, node) for node in [*dates.pause_nodes, *purchase.pause_nodes, *products.pause_nodes]],
         (initial, greeting), (greeting, name), (name, redact_name), (redact_name, email),
         (email, redact_email), (redact_email, confirm),
         (confirm, extract), (confirm, delete_email), (delete_email, email),
         (extract, process), (process, vessel_agent), (vessel_agent, cruise_entities), (cruise_entities, dates.start),
-        (dates.finish, purchase.start), (purchase.last, nxt),
+        (dates.finish, purchase.start), (purchase.last, products.start), (products.last, nxt),
     ]:
         connect(builder, src, dst)
     connect_cruise_date_nodes(builder, dates)
     connect_purchase_detail_nodes(builder, purchase)
+    connect_product_nodes(builder, products)
     return builder.build()

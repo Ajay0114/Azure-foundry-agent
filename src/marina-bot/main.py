@@ -16,6 +16,7 @@ from orchestrator import build_orchestrator
 from shared.agent_node import FoundryAgentRunner
 from shared.deps import Deps
 from shared.llm_dates import FoundryDateReader
+from shared.llm_products import FoundryProductReader
 from shared.osw import OswClient
 from shared.state_store import FileStateStore
 
@@ -60,6 +61,7 @@ def main():
         run_agent=FoundryAgentRunner(client),
         osw=OswClient.from_env(),
         read_dates=FoundryDateReader(client),      # model fallback for dates the parser cannot read
+        read_products=FoundryProductReader(client),  # reads one reply in the product-details questions
     )
     store = FileStateStore()
 

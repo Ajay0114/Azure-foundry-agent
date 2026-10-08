@@ -15,16 +15,17 @@ the ticket and document-request steps will need), see [CODEBASE_GUIDE.md](CODEBA
 
 | Done | Not done yet |
 |---|---|
-| Intake: greeting, name, email with confirmation and retry | Booking number and card nodes, file upload and scan |
+| Intake: greeting, name, email with confirmation and retry | Booking number and card nodes, file upload and scan, return documents |
 | Entity extraction from the first message (Kore prompt, verbatim) | Validation layer |
-| Vessel lookup agent on the real OSW vessel API | Document creation, Zendesk ticket and private notes |
+| Vessel lookup agent on the real OSW vessel API | Feedback survey and the closing messages after the ticket |
 | Cruise dates: parser, voyage API validation, nearest-voyage confirmation | Feedback path, clearing variables between dialogs |
 | Purchase details: purchaser (spa record) name, cabin number, purchase date, delivery type, return reason, country, phone number, cancel | Deployment to Foundry, a production state store, automated tests |
 | Product count and product details with a read-back confirmation, saved in the shape the ticket needs | |
+| "Anything else to add?", then the Zendesk ticket (created once, retry on failure) and the private conversation note | |
 | Terminal chat client for local runs | |
 
-About 40 of the dialog's 92 Kore nodes are ported. `pr_next` in the flow below is a placeholder that stands in for
-the rest.
+About 45 of the dialog's 92 Kore nodes are ported. The dialog now ends with a real Zendesk ticket. Booking number, card
+last four and attachments are not asked yet, so those lines show "N/A" in the ticket, as Kore does when they are absent.
 
 ## Quick start
 
@@ -36,7 +37,7 @@ uv sync --python 3.13                 # install dependencies
 az login                              # DefaultAzureCredential uses this to reach Foundry
 ```
 
-Create `src/marina-bot/.env` (it is git-ignored). Never commit it.
+Copy `src/marina-bot/.env.example` to `src/marina-bot/.env` (git-ignored) and fill it in. Never commit `.env`. The example already holds the sandbox Zendesk form, brand, group and field ids.
 
 | Variable | Needed | Meaning |
 |---|---|---|
@@ -47,10 +48,16 @@ Create `src/marina-bot/.env` (it is git-ignored). Never commit it.
 | `OSW_CLIENT_SECRET` | yes | OAuth client secret. A secret: keep it in `.env` or Key Vault only |
 | `OSW_VESSELS_SCOPE` | yes | `api://<id>/.default` for the vessels API |
 | `OSW_ITINERARY_SCOPE` | yes | `api://<id>/.default` for the itinerary API |
+| `ZENDESK_BASE_URL` | yes | `https://<subdomain>.zendesk.com` |
+| `ZENDESK_AUTHORIZATION` | yes | The value after `Basic ` in Kore's `ZendeskAuthorization` (base64 of `email/token:api_token`). A secret. Or set `ZENDESK_EMAIL` and `ZENDESK_API_TOKEN` and it is built for you |
+| `ZENDESK_FORM_ID`, `ZENDESK_BRAND_ID`, `ZENDESK_RETURN_GROUP_ID` | yes | Ticket form, brand and the returns group |
+| `ZENDESK_FIELD_INQUIRY_TYPE`, `…_CATEGORY`, `…_PRODUCT_REASON`, `…_RETURN_STATUS`, `…_CREATED_BY`, `…_CRUISE_LINE`, `…_CRUISE_SHIP`, `…_PRIORITY`, `…_SAIL_DATE` | yes | Ids of the custom ticket fields (Kore's `Zendesk_*_ID` settings) |
+| `ZENDESK_TAGS` | optional | Comma separated. Defaults to `kore_ai,tag_website`, what Kore sent, so existing Zendesk triggers keep working |
 | `OSW_BASE_URL` | optional | Defaults to `https://oswbus-dev.onespaworld.com` |
 | `MARINA_STATE_DIR` | optional | Where conversation state files go. Defaults to `~/marina_state` |
 
-If a required `OSW_*` value is missing, the bot stops at start-up with a message naming the missing settings.
+If a required `OSW_*` or `ZENDESK_*` value is missing, the bot stops at start-up with a message naming the missing settings.
+**The bot creates real tickets in the Zendesk it is pointed at.** Use a sandbox while testing.
 
 ```bash
 uv run --no-sync python main.py        # start the bot on http://localhost:8088
@@ -77,6 +84,7 @@ python3 chat.py                        # in a second terminal: talk to it (/new,
     │       ├── cruise_dates.py     Cruise start/end date collection and voyage validation
     │       ├── purchase_details.py Purchaser name, cabin, purchase date, delivery type, return reason, country, phone, cancel
     │       ├── product_details.py  Product count, product list (slots and questions), confirmation, saving for the ticket
+    │       ├── ticket.py           "Anything else?", the Zendesk payload, ticket creation, private note, retry
     │       ├── return_extraction.py  Reads the second extraction (cabin, date, phone, country, products) into the notes
     │       └── prompts/            Prompt text copied from Kore, one .md per prompt node
     ├── shared/                 Building blocks used by every dialog
@@ -85,6 +93,7 @@ python3 chat.py                        # in a second terminal: talk to it (/new,
     │   ├── agent_node.py           The "model with tools" node and its Foundry runner
     │   ├── dates.py                Deterministic date parser and date rules
     │   ├── llm_dates.py            Model fallback for dates the parser cannot read (typed structured output)
+    │   ├── zendesk.py              Zendesk client: create ticket, private note, find by external id (settings from the environment)
     │   ├── llm_products.py         Model reader for one reply in the product questions (typed structured output)
     │   ├── countries.py            Country names and aliases ("UK" becomes "United Kingdom")
     │   ├── osw.py                  Real OneSpaWorld vessel and voyage API client (OAuth, search, nearest voyage)
@@ -125,7 +134,7 @@ main.py ── parse_response: the message text + which saved state to load and 
 
 ## The Product Return flow
 
-Node ids are in `workflow.py`, `cruise_dates.py`, `purchase_details.py` and `product_details.py`. The right-hand column is the Kore node each one replaces.
+Node ids are in `workflow.py`, `cruise_dates.py`, `purchase_details.py`, `product_details.py` and `ticket.py`. The right-hand column is the Kore node each one replaces.
 
 | Node id | Kind | What it does | Kore node |
 |---|---|---|---|
@@ -158,7 +167,8 @@ Node ids are in `workflow.py`, `cruise_dates.py`, `purchase_details.py` and `pro
 | `pd_ask_products` | question, loops | Name, quantity and condition of each product (and the expected product for a wrong item) until the count is reached | `PC_HomeDelivery_Agent_ProductDetails` |
 | `pd_confirm_products` | yes/no | Reads the list back; No starts the list again | Kore asks to confirm but never reads the answer |
 | `pd_reset_products`, `pd_save_products` | script | Clear the list / build the ticket list (`productsToReturn`, summary, outcome) | `PC_HomeDelivery_Script_SavingAgentData` |
-| `pr_next` | placeholder | Prints what was captured; stands in for the unported nodes | - |
+| `pd_ask_additional` | question | "Is there anything else you'd like to add?" (optional free text) | `PC_Common_Entity_AdditionalDescription` |
+| `pd_create_ticket` | service | Builds the payload, creates the Zendesk ticket, adds the private transcript, thanks the customer with the ticket number. On failure offers a retry | `PC_HomeDelivery_Script_PrepareZendeskData`, `…_Service_CreateTicket`, `…_ConversationPrivateNote`, `…_ThanksMessage`, `…_Message_TicketFailed` |
 
 ### Vessel lookup (`vessel.py`, `pr_vessel_agent`)
 
@@ -240,6 +250,21 @@ decides everything else.
   expected product), `all_products_summary`, `collectedUnits`, `countMismatch` and `collectionOutcome` (`clean`,
   `partial_review` or `nothing_submittable`) for the ticket step.
 
+### The Zendesk ticket (`ticket.py`, `shared/zendesk.py`)
+
+- **Payload.** One plain function, `build_ticket_payload`, replaces Kore's six string fragments and service-node tokens:
+  subject, requester, HTML body (customer, voyage, spa record, return, products, additional information), form, brand,
+  group, `urgent` priority, tags, and the custom fields (inquiry type, category from the delivery type, return reason,
+  return status, created by, cruise line, ship, priority, sail date). A custom field with no value is left out, not sent blank.
+- **Everything the customer typed is HTML-escaped** before it goes into the ticket. Kore pastes it in raw.
+- **One ticket per request.** Each ticket carries an `external_id`. A create is never retried blindly: before a retry the bot
+  looks for a ticket with that id, so a timeout that actually created the ticket does not produce a duplicate.
+- **Failure.** The customer keeps their answers and is offered a retry (three attempts), then told nothing was submitted.
+  Kore ends the dialog and loses everything.
+- **Private note.** The whole conversation of this request (`session["transcript"]`, started fresh with every new request)
+  is added as a private comment. If the note fails the ticket still stands and the customer is thanked.
+- **Result.** `session["TicketId"]` for the later steps (document request).
+
 ## Conversation state and variables
 
 State has two dictionaries, with Kore's names:
@@ -288,6 +313,9 @@ end (so a failed turn saves nothing). State lives in one JSON file per key under
 - **State store.** Local JSON files: no expiry, no encryption (name and email are stored in clear text), and simultaneous
   messages from one customer can overwrite each other. Replace `shared/state_store.py` (two methods) with Cosmos DB or the
   Foundry state store before production.
+- **Ticket gaps.** The ticket has no booking number, card last four or attachments yet ("N/A"), and the return-document
+  API calls that follow the ticket in Kore are not ported. Zendesk field ids and the form must match the Zendesk you
+  point at; a wrong id is rejected by Zendesk and shows up as a failed create in the log (status code only).
 - **No cleanup between dialogs.** Ending a dialog clears only `active_dialog` and `dialog_step`. Vessel flags and `vessel_id`
   persist, so a second return in the same conversation would skip the ship question. Kore's `ClearData` step is not ported.
 - **Simplified checks.** Name, email, purchaser name, cabin, phone, delivery type and return reason validation are plain
@@ -303,4 +331,8 @@ end (so a failed turn saves nothing). State lives in one JSON file per key under
 - Credentials are read from environment variables only. `.env` is git-ignored.
 - The OAuth client secret appeared in plain text in the Postman collections the APIs were taken from. Rotate it and keep the
   new value out of the repo.
-- Logs contain dates, vessel ids and node names, never tokens or the client secret.
+- Logs contain dates, vessel ids, node names and Zendesk status codes, never tokens, the client secrets or customer details.
+- The Zendesk credential is read from the environment only. Use an API token for a dedicated Zendesk user with the
+  least access that can create tickets and add comments.
+- The conversation transcript, name, email and phone are stored in the state files in clear text (see the state-store
+  limitation above) and sent to Zendesk, where they belong. Tickets are created in whichever Zendesk `ZENDESK_BASE_URL` names.

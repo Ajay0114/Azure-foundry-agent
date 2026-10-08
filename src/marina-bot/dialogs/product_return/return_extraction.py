@@ -18,6 +18,7 @@ import re
 from typing import Any
 
 from models import Turn
+from shared.countries import parse_country
 from shared.validators import parse_cabins, parse_phone
 
 log = logging.getLogger(__name__)
@@ -92,8 +93,8 @@ def process_return_extraction(turn: Turn) -> None:
             e["PurchasedDate"] = s["PurchasedDate"] = raw
 
     if _present(parsed.get("country")):
-        country = str(parsed["country"]).strip()
-        if len(country) >= 2 and re.fullmatch(r"[A-Za-z\s\-'.]+", country):
+        country = parse_country(str(parsed["country"]))
+        if country:
             e["Country"] = s["Country"] = s["resolvedCountry"] = country
 
     if _present(parsed.get("phone_number")):
