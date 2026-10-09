@@ -1,0 +1,11 @@
+# What is left out of the code package azd uploads when it deploys the agent (gitignore syntax).
+# Secrets and local-only files must never be in the package.
+.env
+.env.*
+.venv/
+__pycache__/
+*.pyc
+chat.py
+ui.py
+.azdignore
+.dockerignore
