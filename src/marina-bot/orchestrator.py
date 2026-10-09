@@ -8,6 +8,9 @@ Each dialog is a sub-workflow wrapped in a WorkflowExecutor; adding a dialog = o
 one more classifier label and two more edges.
 """
 
+import asyncio
+import logging
+from datetime import UTC, datetime
 from typing import Never
 
 from agent_framework import Executor, Workflow, WorkflowBuilder, WorkflowContext, WorkflowExecutor, handler
@@ -16,7 +19,10 @@ from dialogs.product_return.workflow import build_product_return_workflow
 from models import Turn, TurnInput
 from shared.deps import Deps
 from shared.flow import PERSIST, PromptRunner, connect, goto
-from shared.state_store import FileStateStore
+from shared.state_store import StateStore
+from shared.transcript import TranscriptConfig, blob_path, record_turn, to_csv
+
+log = logging.getLogger(__name__)
 
 PRODUCT_RETURN = "PRODUCT_RETURN"
 OTHER = "OTHER"
@@ -35,13 +41,13 @@ CLASSIFIER_PROMPT = (
 class TurnEntry(Executor):
     """Loads the saved dialog state for this conversation and routes the turn."""
 
-    def __init__(self, store: FileStateStore):
+    def __init__(self, store: StateStore):
         super().__init__(id="turn_entry")
         self._store = store
 
     @handler
     async def run(self, inp: TurnInput, ctx: WorkflowContext[Turn]) -> None:
-        saved = self._store.load(inp.load_keys) or {}
+        saved = await asyncio.to_thread(self._store.load, inp.load_keys) or {}      # the store may be remote
         turn = Turn(text=inp.text, save_keys=inp.save_keys, attachments=inp.attachments,
                     attachments_unusable=inp.attachments_unusable,
                     session=saved.get("session", {}), entities=saved.get("entities", {}))
@@ -80,9 +86,10 @@ class Fallback(Executor):
 class Persist(Executor):
     """Records the exchange, saves the state, and returns the bot's reply."""
 
-    def __init__(self, store: FileStateStore):
+    def __init__(self, store: StateStore):
         super().__init__(id=PERSIST)
         self._store = store
+        self._transcript = TranscriptConfig.from_env()
 
     @handler
     async def run(self, turn: Turn, ctx: WorkflowContext[Never, str]) -> None:
@@ -99,11 +106,26 @@ class Persist(Executor):
         transcript = turn.session.setdefault("transcript", [])
         transcript += [f"User: {turn.text}", f"Bot: {reply}"]
         turn.session["transcript"] = transcript[-TRANSCRIPT_LINES:]
-        self._store.save(turn.save_keys, {"session": turn.session, "entities": turn.entities})
+        # The conversation log behind the transcript CSV: one row per message, with a time (shared/transcript.py).
+        record_turn(turn.session, turn.text, turn.replies or [reply], len(turn.attachments) + turn.attachments_unusable,
+                    datetime.now(UTC))
+        await asyncio.to_thread(self._store.save, turn.save_keys, {"session": turn.session, "entities": turn.entities})
+        await self._write_transcript(turn)
         await ctx.yield_output(reply)
 
+    async def _write_transcript(self, turn: Turn) -> None:
+        """The whole conversation as a CSV, rewritten each turn. Secondary: a failure is logged, never shown to the customer."""
+        if not self._transcript.enabled or not turn.save_keys:
+            return
+        key = turn.save_keys[0]
+        try:
+            await asyncio.to_thread(self._store.save_transcript, blob_path(turn.session, key),
+                                    to_csv(turn.session, key, self._transcript))
+        except Exception as exc:                              # noqa: BLE001
+            log.warning("could not write the conversation transcript: %s: %s", type(exc).__name__, exc)
 
-def build_orchestrator(deps: Deps, store: FileStateStore) -> Workflow:
+
+def build_orchestrator(deps: Deps, store: StateStore) -> Workflow:
     entry = TurnEntry(store)
     classifier = IntentClassifier(deps.run_prompt)
     product_return = WorkflowExecutor(build_product_return_workflow(deps), id=PRODUCT_RETURN.lower())

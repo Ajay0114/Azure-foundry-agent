@@ -14,7 +14,7 @@ It runs locally against a real Foundry model deployment and OneSpaWorld's real v
 document APIs. There is no built-in fake data, so the settings below are required.
 
 For a file-by-file guide, where the AI model and the APIs are used, and where each session variable lives, see
-[CODEBASE_GUIDE.md](CODEBASE_GUIDE.md).
+[CODEBASE_GUIDE.md](CODEBASE_GUIDE.md). To run it in Foundry, follow [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Status
 
@@ -26,13 +26,15 @@ conversations, so they are left out). About 55 of the dialog's 92 Kore nodes are
 | Intake: greeting, name, email with confirmation and retry | Booking number and credit card last four |
 | Entity extraction from the first message (Kore prompts, verbatim) | Feedback survey after the thank-you |
 | Vessel lookup agent on the real OSW vessel API | Clearing the name, email and ship between two requests in one chat |
-| Cruise dates: parser, voyage API validation, nearest-voyage confirmation | Deployment to Foundry (no `azure.yaml` or Dockerfile yet) |
-| Purchase details: purchaser (spa record) name, cabin, purchase date, delivery type, return reason, country, phone, cancel at any question | A production state store (Cosmos DB or the Foundry store) |
+| Cruise dates: parser, voyage API validation, nearest-voyage confirmation | Running it in Foundry: the files and the step-by-step runbook are ready, but it has not been deployed yet |
+| Purchase details: purchaser (spa record) name, cabin, purchase date, delivery type, return reason, country, phone, cancel at any question | Secrets in Key Vault, and a concurrency-safe state store (Cosmos DB) for heavy traffic |
 | Product count and product details, read back for confirmation | Automated tests in the repo |
 | "Anything else to add?" and end-of-cruise statement upload (scanned, attached to the ticket) | |
 | The Zendesk ticket (created once, retry on failure) with a private note holding the whole conversation | |
 | The returns and transactions documents requested for the ticket, with a private note on any failure | |
+| The complete conversation as a CSV in Kore's transcript layout, one file per conversation, names, e-mails and phone numbers masked | |
 | Terminal chat client (`chat.py`) and a small web chat page (`ui.py`) for local testing | |
+| Deployment files for a Foundry hosted agent (`azure.yaml`, `Dockerfile`, `scripts/set-azd-env.sh`) and conversation state in Azure Blob Storage | |
 
 **Verified live** (real model and APIs, by chatting): intake, vessel lookup, cruise dates, purchase details, product
 details and the Zendesk ticket (sandbox). **Not yet run against the real service:** the attachment function and the
@@ -69,7 +71,10 @@ already holds the sandbox Zendesk form, brand, group and field ids.
 | `DOCUMENT_TOKEN_URL` | optional | Defaults to `OSW_TOKEN_URL` (same tenant) |
 | `ZENDESK_TAGS` | optional | Comma separated. Defaults to `kore_ai,tag_website`, what Kore sent, so existing Zendesk triggers keep working |
 | `OSW_BASE_URL` | optional | Defaults to `https://oswbus-dev.onespaworld.com` |
-| `MARINA_STATE_DIR` | optional | Where conversation state files go. Defaults to `~/marina_state` |
+| `STATE_BLOB_ACCOUNT_URL`, `STATE_BLOB_CONTAINER` | when hosted | Keep conversation state in Azure Blob Storage (for this project `https://oswdevpoc.blob.core.windows.net`; container default `marina-state-ai-foundry`) with the agent's own identity. Leave unset locally |
+| `STATE_BLOB_CONNECTION_STRING` | optional stopgap | The storage account's connection string, used instead of the identity while a role is pending. It is a **master key** for the whole account: sandbox only, rotate it afterwards (see [DEPLOYMENT.md](DEPLOYMENT.md)) |
+| `TRANSCRIPT_ENABLED`, `TRANSCRIPT_MASK_PII`, `TRANSCRIPT_BOT_NAME`, `TRANSCRIPT_CHANNEL` | optional | The transcript CSV: write it (default `true`), mask names, e-mails and phone numbers (default `true`), and the "Bot Name" (default `Marina`) and "Channel" (default `Foundry`) columns. When hosted, add a variable to `azure.yaml` as well to change it |
+| `MARINA_STATE_DIR` | optional | Where local state files go when Blob Storage is not configured. Defaults to `~/marina_state` |
 
 If a required `OSW_*`, `ZENDESK_*`, `ATTACHMENT_*` or `DOCUMENT_*` value is missing, the bot stops at start-up with a message
 naming the missing settings. **The bot creates real tickets in the Zendesk it is pointed at.** Use a sandbox while testing.
@@ -86,7 +91,9 @@ At the upload question, type `skip`, or attach a file **link** (`/attach https:/
 
 ```
 .
-├── README.md, CODEBASE_GUIDE.md
+├── README.md, CODEBASE_GUIDE.md, DEPLOYMENT.md
+├── azure.yaml              Foundry hosted-agent deployment manifest (azd)
+├── scripts/set-azd-env.sh  Copies the settings from .env into the azd environment
 ├── .gitignore
 └── src/marina-bot/
     ├── main.py                 Entry point: connects to Foundry, builds the dependencies, starts the server
@@ -95,6 +102,7 @@ At the upload question, type `skip`, or attach a file **link** (`/attach https:/
     ├── chat.py                 Terminal chat client for local testing (not part of the deployed bot)
     ├── ui.py                   Small local web chat page (stdlib only); forwards messages to the bot
     ├── .env.example            Every setting, with the sandbox Zendesk ids filled in; copy to .env
+    ├── Dockerfile, .dockerignore, .azdignore    How the agent is built and what is left out of the package
     ├── pyproject.toml, uv.lock, uv.toml    Dependencies, pinned versions, corporate-certificate setting
     ├── dialogs/
     │   └── product_return/     The Product Return dialog (Kore: PC_HomeDelivery)
@@ -123,7 +131,8 @@ At the upload question, type `skip`, or attach a file **link** (`/attach https:/
         ├── documents.py            Document-creation API client (OAuth, returns and transactions requests)
         ├── htmltext.py             HTML-escaping helper for ticket text
         ├── deps.py                 One bundle of outside connections (model, agent runner, OSW, Zendesk, attachments, documents, clock)
-        ├── state_store.py          Saves and loads conversation state between messages (JSON files)
+        ├── state_store.py          Saves and loads conversation state between messages (Azure Blob Storage, or local JSON files)
+        ├── transcript.py           Builds the conversation transcript CSV (Kore's columns) and masks personal details
         ├── session.py              DialogContext: the session/entities dictionaries, Kore's key names
         └── prompts.py              Fills {{placeholders}} in prompt files
 ```
@@ -327,10 +336,19 @@ State has two dictionaries, with Kore's names:
 | `entities` | `context.entities` | Values collected in the dialog: name, email, ship, vessel id, start and end date, `SpaRecordName`, `CabinNumber`, `PurchasedDate`, `Country`, `ProductCount`, delivery type, return reason, additional information |
 
 Per message: `turn_entry` loads the state, nodes read and edit the dictionaries in place, and `persist` saves them once at the
-end (so a failed turn saves nothing). State lives in one JSON file per key under `MARINA_STATE_DIR`. The load key is the
-`conversation_id` or the client's `previous_response_id`; the save keys are the `conversation_id` and this
-`response_id`, so chaining by `previous_response_id` gives one snapshot file per turn. The full list of variables and who
-writes each one is in [CODEBASE_GUIDE.md](CODEBASE_GUIDE.md).
+end (so a failed turn saves nothing). State lives in one JSON document per key: a blob in Azure Blob Storage when `STATE_BLOB_ACCOUNT_URL` is set (Foundry), otherwise a file under `MARINA_STATE_DIR`. A conversation has **one key**: the
+`conversation_id` when the client uses conversations, otherwise the platform's session id (the same for every message of a
+session), so the state is one file that is overwritten on each message, not a new file per message. The full list of
+variables and who writes each one is in [CODEBASE_GUIDE.md](CODEBASE_GUIDE.md).
+
+### The conversation transcript
+
+After every message the bot also rewrites `transcripts/<yyyy-mm-dd>/<conversation>.csv` in the same container (or
+folder), so every conversation of a day sits in that day's folder, for example `transcripts/2026-10-09/`: the whole conversation so far, in the columns of Kore's transcript export (`Bot Name, User, Channel, Language, Bot Message,
+User Message, Timestamp, emailData`), one row per message, with a file the customer sent shown as "Attachment uploaded". It
+is rewritten rather than written at the end, so it is complete even when the customer walks away half-way. Names, e-mails and
+phone numbers are masked (`#*#NAME#*#`, `#*#EMAIL#*#`, `#*#PHONE#*#`) as Kore's export masks them; the unmasked text stays only in the
+conversation state, which the Zendesk ticket needs. Times are UTC. A conversation stays in the folder of the day it started, even if it runs past midnight. A failure to write it is logged and never shown to the customer.
 
 ## Key mechanisms
 
@@ -355,6 +373,8 @@ writes each one is in [CODEBASE_GUIDE.md](CODEBASE_GUIDE.md).
   rebuilt graph has a different name.
 - **Checkpoint allowlist.** The host checkpoints each turn's messages and restores only types allowed by name, so `main.py`
   lists `models:TurnInput` and `models:Turn`. Any new class sent between nodes as a message must be added there.
+- **Foundry.** The platform injects `FOUNDRY_PROJECT_ENDPOINT` and the Application Insights connection string; see
+  [DEPLOYMENT.md](DEPLOYMENT.md).
 - **Local sessions.** Locally a request needs an `agent_session_id` so successive turns share a scope; `chat.py` and `ui.py`
   echo the one the server returns. In a hosted deployment the platform supplies it.
 - **Files.** `parse_response` reads the request's input items (`get_input_items`) and keeps the `input_file` and
@@ -367,9 +387,11 @@ writes each one is in [CODEBASE_GUIDE.md](CODEBASE_GUIDE.md).
   development the later stages were checked with a larger suite (parsers, every conversation path, all four HTTP clients
   against mock servers) that lives outside the repo; it can be added back if wanted. The bot itself needs the real Foundry
   model and the real APIs to run.
-- **State store.** Local JSON files: no expiry, no encryption (name, email, phone and the whole conversation are stored in
-  clear text), and simultaneous messages from one customer can overwrite each other. Replace `shared/state_store.py` (two
-  methods) with Cosmos DB or the Foundry state store before production.
+- **State store.** Local files have no expiry and no sharing between instances, so use Blob Storage when hosted (set
+  `STATE_BLOB_ACCOUNT_URL`; add a lifecycle rule to expire old conversations, see [DEPLOYMENT.md](DEPLOYMENT.md)). Name, email, phone
+  and the whole conversation are stored as clear JSON in either store, and two simultaneous messages from one customer
+  can overwrite each other (last write wins). Cosmos DB is the next step if that matters: `shared/state_store.py` has
+  two methods.
 - **No full cleanup between requests.** Starting a new purchase stage clears the purchase answers, the products, the ticket
   and the document results, and a new request starts a new transcript. But the name, email, vessel and cruise dates are kept,
   so a second return in the same conversation skips those questions. Kore's `ClearData` step is not ported.
@@ -385,11 +407,16 @@ writes each one is in [CODEBASE_GUIDE.md](CODEBASE_GUIDE.md).
   configuration in the Kore export and was skipped.
 - **Models.** Prompts run on the deployed model, not Kore's `gpt-5.1`, and Kore's temperature and token settings are not
   applied.
-- **Not deployed.** There is no `azure.yaml` or Dockerfile yet. Use the Foundry samples (`05-workflows`) as the template.
+- **Not deployed yet.** The deployment files follow the Foundry sample `05-workflows` and the steps are in
+  [DEPLOYMENT.md](DEPLOYMENT.md), but they have not been run against the real subscription. `azd` prompts may differ slightly.
+- **Secrets as plain environment variables.** In Foundry the secrets are passed as the agent's environment variables
+  (and sit in `.azure/` on the deploying machine). Move them to Key Vault before production.
 
 ## Security
 
-- Credentials are read from environment variables only. `.env` is git-ignored; `.env.example` holds no secrets.
+- Credentials are read from environment variables only. `.env` and the azd environment (`.azure/`) are git-ignored;
+  `.env.example` holds no secrets. In Foundry the agent reaches Blob Storage and the model with its own Microsoft Entra
+  identity, with no keys.
 - The OAuth client secret appeared in plain text in the Postman collections the OSW APIs were taken from. Rotate it and keep
   the new value out of the repo.
 - The Zendesk credential, the attachment function key and the document client secret are also read from the environment

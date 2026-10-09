@@ -6,6 +6,7 @@ requires-python = ">=3.13"
 dependencies = [
     "agent-framework-foundry",
     "agent-framework-foundry-hosting>=1.0.0b260813",
+    "azure-storage-blob>=12.19",
     "debugpy",
     "httpx>=0.28.1",
 ]

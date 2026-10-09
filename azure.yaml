@@ -1,0 +1,119 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+#
+# Deploys the Marina bot as a Foundry hosted agent (Responses protocol). Modeled on the Foundry sample
+# samples/python/hosted-agents/agent-framework/responses/05-workflows.
+#
+# The Foundry project and the model deployment already exist, so do NOT run `azd provision` for them: run
+# `azd ai agent init -m azure.yaml`, choose the existing project and deployment when asked, then `azd deploy`.
+# Every ${NAME} below is read from the azd environment (not your shell). `scripts/set-azd-env.sh` copies them from
+# src/marina-bot/.env. See "Deploying to Foundry" in README.md.
+
+requiredVersions:
+  azd: '>=1.27.1'
+  extensions:
+    azure.ai.agents: '>=1.0.0-beta.9'
+name: marina-bot
+services:
+  ai-project:
+    host: azure.ai.project
+  marina-bot:
+    host: azure.ai.agent
+    metadata:
+      tags:
+        - Agent Framework
+        - AI Agent Hosting
+        - Azure AI AgentServer
+        - Responses Protocol
+    project: src/marina-bot
+    language: python
+    codeConfiguration:
+      runtime: python_3_13
+      entryPoint: main.py
+    uses:
+      - ai-project
+    kind: hosted
+    name: marina-bot
+    displayName: Marina product returns
+    description: Marina, the OneSpaWorld customer-service bot: product returns, from the first message to a Zendesk ticket and the return documents.
+    protocols:
+      - protocol: responses
+        version: 2.0.0
+    # How long a customer's session stays alive after their last message (300 to 3600 seconds, default 900).
+    sessionConfiguration:
+      idleTimeoutSeconds: 1800
+    environmentVariables:
+      # Foundry injects FOUNDRY_PROJECT_ENDPOINT and APPLICATIONINSIGHTS_CONNECTION_STRING itself.
+      - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
+        value: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
+      # Conversation state (Azure Blob Storage, read and written with the agent's own identity)
+      - name: STATE_BLOB_ACCOUNT_URL
+        value: ${STATE_BLOB_ACCOUNT_URL}
+      - name: STATE_BLOB_CONTAINER
+        value: ${STATE_BLOB_CONTAINER}
+      # Optional stopgap: the account's connection string instead of the agent's identity (leave empty normally)
+      - name: STATE_BLOB_CONNECTION_STRING
+        value: ${STATE_BLOB_CONNECTION_STRING}
+      # OneSpaWorld vessel and itinerary APIs
+      - name: OSW_BASE_URL
+        value: ${OSW_BASE_URL}
+      - name: OSW_TOKEN_URL
+        value: ${OSW_TOKEN_URL}
+      - name: OSW_CLIENT_ID
+        value: ${OSW_CLIENT_ID}
+      - name: OSW_CLIENT_SECRET
+        value: ${OSW_CLIENT_SECRET}
+      - name: OSW_VESSELS_SCOPE
+        value: ${OSW_VESSELS_SCOPE}
+      - name: OSW_ITINERARY_SCOPE
+        value: ${OSW_ITINERARY_SCOPE}
+      # Zendesk
+      - name: ZENDESK_BASE_URL
+        value: ${ZENDESK_BASE_URL}
+      - name: ZENDESK_AUTHORIZATION
+        value: ${ZENDESK_AUTHORIZATION}
+      - name: ZENDESK_FORM_ID
+        value: ${ZENDESK_FORM_ID}
+      - name: ZENDESK_BRAND_ID
+        value: ${ZENDESK_BRAND_ID}
+      - name: ZENDESK_RETURN_GROUP_ID
+        value: ${ZENDESK_RETURN_GROUP_ID}
+      - name: ZENDESK_FIELD_CREATED_BY
+        value: ${ZENDESK_FIELD_CREATED_BY}
+      - name: ZENDESK_FIELD_PRIORITY
+        value: ${ZENDESK_FIELD_PRIORITY}
+      - name: ZENDESK_FIELD_INQUIRY_TYPE
+        value: ${ZENDESK_FIELD_INQUIRY_TYPE}
+      - name: ZENDESK_FIELD_CATEGORY
+        value: ${ZENDESK_FIELD_CATEGORY}
+      - name: ZENDESK_FIELD_CRUISE_LINE
+        value: ${ZENDESK_FIELD_CRUISE_LINE}
+      - name: ZENDESK_FIELD_CRUISE_SHIP
+        value: ${ZENDESK_FIELD_CRUISE_SHIP}
+      - name: ZENDESK_FIELD_SAIL_DATE
+        value: ${ZENDESK_FIELD_SAIL_DATE}
+      - name: ZENDESK_FIELD_PRODUCT_REASON
+        value: ${ZENDESK_FIELD_PRODUCT_REASON}
+      - name: ZENDESK_FIELD_RETURN_STATUS
+        value: ${ZENDESK_FIELD_RETURN_STATUS}
+      # Attachment scan-and-stage function
+      - name: ATTACHMENT_API_URL
+        value: ${ATTACHMENT_API_URL}
+      - name: ATTACHMENT_API_KEY
+        value: ${ATTACHMENT_API_KEY}
+      # Document-creation API
+      - name: DOCUMENT_API_URL
+        value: ${DOCUMENT_API_URL}
+      - name: DOCUMENT_CLIENT_ID
+        value: ${DOCUMENT_CLIENT_ID}
+      - name: DOCUMENT_CLIENT_SECRET
+        value: ${DOCUMENT_CLIENT_SECRET}
+      - name: DOCUMENT_RETURNS_SCOPE
+        value: ${DOCUMENT_RETURNS_SCOPE}
+      - name: DOCUMENT_TRANSACTIONS_SCOPE
+        value: ${DOCUMENT_TRANSACTIONS_SCOPE}
+    container:
+      resources:
+        cpu: '0.5'
+        memory: 1Gi
+infra:
+  provider: microsoft.foundry

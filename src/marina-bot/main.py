@@ -21,7 +21,7 @@ from shared.documents import DocumentClient
 from shared.llm_dates import FoundryDateReader
 from shared.llm_products import FoundryProductReader
 from shared.osw import OswClient
-from shared.state_store import FileStateStore
+from shared.state_store import make_state_store
 from shared.zendesk import ZendeskClient
 
 load_dotenv()
@@ -45,8 +45,10 @@ def make_prompt_runner(client):
 async def parse_response(request: HostedResponseRequest) -> WorkflowTurn[TurnInput]:
     """Map one Responses request to one workflow turn.
 
-    Dialog state is looked up by conversation id, or by the previous response id when the caller
-    chains with previous_response_id, and saved under this conversation / response id.
+    One conversation has ONE key, so its state (and its transcript) is one file that is overwritten each turn instead of
+    a new file per message: the conversation id when the caller uses conversations, otherwise the platform's session id
+    (stable for every message of a session; locally the id the server handed back and the client echoes).
+    The previous response id is still tried when loading, so state saved by an earlier version is found and moved to the key.
     """
     text = await request.get_input_text() or ""
     try:                                                  # files sent with the message (Kore: the attachment entity)
@@ -55,8 +57,10 @@ async def parse_response(request: HostedResponseRequest) -> WorkflowTurn[TurnInp
         log.warning("could not read the input items; continuing without attachments")
         attachments, unusable = [], 0
     previous = request.request.get("previous_response_id")
-    load_keys = [k for k in (request.conversation_id, previous) if k]
-    save_keys = [k for k in (request.conversation_id, request.response_id) if k]
+    session_id = getattr(getattr(request, "scope", None), "session_id", None)
+    key = request.conversation_id or session_id or request.response_id
+    load_keys = [k for k in (key, previous) if k]
+    save_keys = [key]
     return WorkflowTurn(input=TurnInput(text=text, load_keys=load_keys, save_keys=save_keys,
                                         attachments=attachments, attachments_unusable=unusable))
 
@@ -77,7 +81,7 @@ def main():
         read_dates=FoundryDateReader(client),      # model fallback for dates the parser cannot read
         read_products=FoundryProductReader(client),  # reads one reply in the product-details questions
     )
-    store = FileStateStore()
+    store = make_state_store()        # Azure Blob Storage when STATE_BLOB_ACCOUNT_URL is set, otherwise local files
 
     def factory(request: HostedResponseRequest):
         return build_orchestrator(deps, store)

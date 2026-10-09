@@ -1004,6 +1004,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "agent-framework-foundry" },
     { name = "agent-framework-foundry-hosting" },
+    { name = "azure-storage-blob" },
     { name = "debugpy" },
     { name = "httpx" },
 ]
@@ -1012,6 +1013,7 @@ dependencies = [
 requires-dist = [
     { name = "agent-framework-foundry" },
     { name = "agent-framework-foundry-hosting", specifier = ">=1.0.0b260813" },
+    { name = "azure-storage-blob", specifier = ">=12.19" },
     { name = "debugpy" },
     { name = "httpx", specifier = ">=0.28.1" },
 ]

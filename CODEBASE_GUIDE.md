@@ -61,7 +61,7 @@ The vessels and itinerary APIs use **different OAuth scopes**, and so do the two
 token per scope. A `401` triggers one token refresh and retry; a `404` on the voyage endpoints means "no match". The
 Zendesk and attachment calls use a static credential from the environment.
 
-The only other external store is the state file (section 5).
+The only other external store is the conversation state (section 5): Azure Blob Storage when hosted.
 
 ## 4. File by file
 
@@ -75,6 +75,7 @@ The only other external store is the state file (section 5).
 | `chat.py` | A terminal client for local testing, with `/new`, `/attach <https-url>` and `/quit`. Not part of the deployed bot |
 | `ui.py` | A small web chat page for local testing (one file, standard library only). Serves the page on :8000 and forwards each message to the bot on :8088, keeping the conversation and session ids like `chat.py`. Has an "attach a file link" box. Listens on 127.0.0.1 only. Not part of the deployed bot |
 | `.env.example` | Every setting, with the sandbox Zendesk ids filled in. Copy to `.env` |
+| `Dockerfile`, `.dockerignore`, `.azdignore` | How the Foundry hosted agent is built (uv, Python 3.13, port 8088) and which local-only files (`chat.py`, `ui.py`, `.env`) stay out of it |
 
 ### `dialogs/product_return/`: the Product Return dialog
 
@@ -109,7 +110,8 @@ The only other external store is the state file (section 5).
 | `documents.py` | `DocumentClient`: OAuth client credentials (one token per scope, one refresh on a 401) and the two document requests; `error_detail` follows Kore's error-text order |
 | `htmltext.py` | `esc`: HTML-escapes customer and API text before it goes into a ticket |
 | `deps.py` | One bundle of outside connections: the one-shot model call, the agent runner, the OSW, Zendesk, attachment and document clients, the clock, and the optional date and product readers |
-| `state_store.py` | Loads and saves the conversation state as JSON files (section 5) |
+| `transcript.py` | The conversation transcript: `record_turn` keeps one timed row per message in the session, `to_csv` renders Kore's transcript columns, `mask_text` replaces names, e-mails and phone numbers, `blob_path` names the file (`transcripts/<yyyy-mm-dd>/<conversation>.csv`). Settings: `TranscriptConfig` (`TRANSCRIPT_*`) |
+| `state_store.py` | Loads and saves the conversation state and the transcript file (section 5): `BlobStateStore` (Azure Blob Storage, used when `STATE_BLOB_ACCOUNT_URL` is set, with the identity; or when `STATE_BLOB_CONNECTION_STRING` is set, a shared-key stopgap that wins over the identity and logs a warning), `FileStateStore` (local files), and `make_state_store()` which picks one. The methods are synchronous; the orchestrator calls them through `asyncio.to_thread` |
 | `session.py` | `DialogContext`: the `session` and `entities` dictionaries, using Kore's key names |
 | `prompts.py` | Fills `{{placeholders}}` in prompt files by plain text replacement (the prompts contain literal JSON braces, so Python formatting cannot be used) |
 
@@ -118,12 +120,19 @@ The only other external store is the state file (section 5).
 There are two layers:
 
 1. **In memory during a message:** `turn.session` and `turn.entities`, two dictionaries that every step reads and edits in place.
-2. **On disk between messages:** one JSON file per key in `~/marina_state` (override with `MARINA_STATE_DIR`).
+2. **In storage between messages:** one JSON document per key. In Foundry (`STATE_BLOB_ACCOUNT_URL` set) it is a blob
+   `state/<key>.json` in the container `STATE_BLOB_CONTAINER`, read and written with the agent's own identity; locally it is a file
+   in `~/marina_state` (override with `MARINA_STATE_DIR`).
    `TurnEntry` (`orchestrator.py`) loads it; `Persist` (`orchestrator.py`) saves it. Nothing else touches storage.
 
-**Which file:** the load key is the `conversation_id`, or the client's `previous_response_id`. The save keys are the
-`conversation_id` and this message's `response_id`. A client that chains with `previous_response_id` therefore produces one
-snapshot file per message. A failed message saves nothing, so the next try starts from the last good state.
+**Which document:** a conversation has ONE key: the `conversation_id` when the client uses conversations, otherwise the platform's
+session id (`request.scope.session_id`, the same for every message of a session). `parse_response` loads from that key (and from
+the client's `previous_response_id` too, so state saved by an earlier version is found) and saves to that key only, so the state is
+one document overwritten on each message. A failed message saves nothing, so the next try starts from the last good state.
+
+**The transcript file** is a second document per conversation, `transcripts/<yyyy-mm-dd>/<key>.csv`, rewritten by `Persist`
+after the state is saved (see `shared/transcript.py`). It is built from `session["transcript_rows"]` (raw text with a time) and
+masked when written. Failing to write it is logged, never shown to the customer.
 
 **Not saved:** the per-message flags in `Turn` (`route`, `resuming`, `replies`, `attachments`). They are rebuilt every time.
 A file's upload tokens are saved (`zd_tokens_combined`), not the file.
@@ -156,7 +165,8 @@ A file's upload tokens are saved (`zd_tokens_combined`), not the file.
 | `session.returnsValidationStatus`, `transactionValidationStatus`, `returnsFailedFieldsDisplay`, `transactionFailedFieldsDisplay`, `documentFailTags` | `pd_create_ticket` |
 | `session.TicketId`, `ticketExternalId`, `ticketError`, `privateNoteFailed` | `pd_create_ticket` |
 | `session.returnsDocumentStatus`, `transactionsDocumentStatus` (`created`, `failed`, `not_requested` or `skipped`) | `pd_finalise_request` |
-| `session.transcript` (the whole request, last 400 lines; cleared when a new request starts) | `Persist`, and the entry step |
+| `session.transcript` (the whole request as text lines for the ticket's private note, last 400; cleared when a new request starts) | `Persist`, and the entry step |
+| `session.transcript_rows` (one timed row per message, last 600) and `started_at`: what the transcript CSV is built from | `Persist` |
 | `session.active_dialog`, `dialog_step` | the classifier, and any step that pauses |
 | `session.conversationHistoryString` (last 10 lines), `session.messages` (last 20) | `Persist` |
 
@@ -212,9 +222,9 @@ protocol class in `deps.py` so tests can supply a fake), write the result back t
 1. **Booking number and credit card.** Not asked, so the ticket shows `N/A` and the documents omit them. If they are added
    later, decide first how to hold a card: the state files are plain, unencrypted JSON, so a full card must not be stored
    there (mask it, keep only the last digits, or hold it encrypted).
-2. **The state store.** It must move from local files to an encrypted store with an expiry (for example Cosmos DB or the
-   Foundry state store) before any of this holds real customer data. It now holds the whole conversation as well as the
-   name, email and phone. `shared/state_store.py` has only two methods, so it is a contained swap.
+2. **The state store.** Blob Storage (encrypted at rest by Azure) replaces local files when hosted. Still to decide: a lifecycle rule
+   that deletes old conversations (it holds the whole chat, name, email and phone), and whether Cosmos DB is needed for
+   concurrency. `shared/state_store.py` has two methods, so it is a contained swap.
 3. **Clearing variables between requests.** Starting a purchase stage clears the purchase answers, products, ticket and
    document results, and a new request starts a new transcript. The name, email, vessel and cruise dates are kept, so a
    second return in the same conversation skips those questions. Kore's `ClearData` step is not ported.
@@ -225,5 +235,7 @@ protocol class in `deps.py` so tests can supply a fake), write the result back t
    from their device has to upload it somewhere the function can fetch it, then send the link. The function must also
    restrict which hosts it downloads from.
 6. **Feedback survey.** Kore's `HomeDelivery_FeedBackSurvey` after the thank-you is not ported.
-7. **Tests.** The repo has none. The development suite (parsers, every conversation path, the four HTTP clients against mock
+7. **Secrets.** When hosted they are plain environment variables of the agent. Move them to Key Vault before production.
+8. **Deployment.** The files exist but have not been run against the real subscription: see `DEPLOYMENT.md`.
+9. **Tests.** The repo has none. The development suite (parsers, every conversation path, the four HTTP clients against mock
    servers) lives outside the repo and can be added back.
