@@ -91,9 +91,19 @@ The only other external store is the conversation state (section 5): Azure Blob 
 | `purchase_details.py` | The purchase-details nodes (`pd_*`): purchaser name, second extraction, cabin number, policy note, purchase date, delivery type, return reason (and the "Other" description), country, phone number and cancel. `QuestionNode` is the shared base for every question in the dialog's later stages. A typed `PurchaseDetailsState` (ask and failure counters, partial dates, the last rejected date, the product-question bookkeeping) is stored under `session["purchaseDetails"]`. `start_purchase_details` clears the previous answers of this stage (including the ticket and document results) so a second return starts clean |
 | `product_details.py` | Product count and product details (`pd_ask_product_count`, `pd_ask_products`, `pd_confirm_products`, `pd_reset_products`, `pd_save_products`). The decision logic is a set of small pure functions (`next_question`, `apply_reading`, `is_complete`) that fill product slots from what the model read; `save_products` builds `productsToReturn` in the shape Kore's ticket script expects |
 | `ticket.py` | "Anything else to add?" (`pd_ask_additional`), the file upload question (`pd_ask_upload`), the ticket step (`pd_create_ticket`) and the closing step (`pd_finalise_request`: attachment note, both documents, thank-you). `build_ticket_payload` and `build_description` are pure functions (Kore's `PrepareZendeskData`); `build_private_note` builds the transcript comment. Customer text is HTML-escaped |
+| `feedback.py` | The satisfaction question after the thank-you (`pd_feedback`): rating 1-5 with buttons, an optional comment for 1-3, "no thanks" skips. Saved as `session["csat"]` and added to the Zendesk ticket as a private note (escaped). Not in Kore; only runs after a ticket exists |
 | `return_documents.py` | Pure functions: which fields each document needs (`validate_documents`, Kore's `ValidationScript`), the two document payloads, the private notes for a missing field or an API error, and the failure tags |
 | `return_extraction.py` | Port of Kore's `SaveEntities` script: validates the second extraction's output and stores cabin, raw purchase date, country, phone, product count, products, and "customer doesn't know" flags |
 | `prompts/` | The prompt texts copied from Kore, one `.md` per prompt, with `{{placeholders}}` |
+
+### `callback_main.py` and `callback/`: the document-event callback (a second hosted agent)
+
+| File | What it does |
+|---|---|
+| `callback_main.py` | Entry point of the `marina-callback` agent (Kore's CallBackAgent app). One request = one event: parse, apply, answer with a JSON outcome. No model |
+| `callback/events.py` | The event shape, `parse_event` (ticket id = `requestReferenceId`, must be numeric), the routing table (eventType to handler) and the tag name. Pure functions |
+| `callback/handler.py` | Applies one event to its ticket: DocumentCreated (attach + tag), the tag-and-comment events, DocumentsSearchDelegated (also the SPA manager e-mail). Two attempts, then the redrive queue; an already-processed event id is skipped |
+| `callback/clients.py` | The upload function (`/api/upload` with a document id: returns the Zendesk upload token) and the redrive queue (`/api/enqueue`) |
 
 ### `shared/`: building blocks used by every dialog
 

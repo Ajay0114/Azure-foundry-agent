@@ -82,5 +82,58 @@ services:
         protocols:
             - protocol: responses
               version: 2.0.0
+    # The document-event callback: a second hosted agent from the same code, started from callback_main.py. OneSpaWorld's
+    # document service sends it events; it updates the Zendesk ticket. No model is used. See DEPLOYMENT.md.
+    marina-callback:
+        project: ./src/marina-bot
+        host: azure.ai.agent
+        language: python
+        uses:
+            - ai-project
+        env:
+            STATE_BLOB_ACCOUNT_URL: ${STATE_BLOB_ACCOUNT_URL}
+            STATE_BLOB_CONTAINER: ${STATE_BLOB_CONTAINER}
+            STATE_BLOB_CONNECTION_STRING: ${STATE_BLOB_CONNECTION_STRING}
+            OSW_BASE_URL: ${OSW_BASE_URL}
+            OSW_TOKEN_URL: ${OSW_TOKEN_URL}
+            OSW_CLIENT_ID: ${OSW_CLIENT_ID}
+            OSW_CLIENT_SECRET: ${OSW_CLIENT_SECRET}
+            OSW_VESSELS_SCOPE: ${OSW_VESSELS_SCOPE}
+            OSW_ITINERARY_SCOPE: ${OSW_ITINERARY_SCOPE}
+            ZENDESK_BASE_URL: ${ZENDESK_BASE_URL}
+            ZENDESK_AUTHORIZATION: ${ZENDESK_AUTHORIZATION}
+            ZENDESK_FORM_ID: ${ZENDESK_FORM_ID}
+            ZENDESK_BRAND_ID: ${ZENDESK_BRAND_ID}
+            ZENDESK_RETURN_GROUP_ID: ${ZENDESK_RETURN_GROUP_ID}
+            ZENDESK_FIELD_CREATED_BY: ${ZENDESK_FIELD_CREATED_BY}
+            ZENDESK_FIELD_PRIORITY: ${ZENDESK_FIELD_PRIORITY}
+            ZENDESK_FIELD_INQUIRY_TYPE: ${ZENDESK_FIELD_INQUIRY_TYPE}
+            ZENDESK_FIELD_CATEGORY: ${ZENDESK_FIELD_CATEGORY}
+            ZENDESK_FIELD_CRUISE_LINE: ${ZENDESK_FIELD_CRUISE_LINE}
+            ZENDESK_FIELD_CRUISE_SHIP: ${ZENDESK_FIELD_CRUISE_SHIP}
+            ZENDESK_FIELD_SAIL_DATE: ${ZENDESK_FIELD_SAIL_DATE}
+            ZENDESK_FIELD_PRODUCT_REASON: ${ZENDESK_FIELD_PRODUCT_REASON}
+            ZENDESK_FIELD_RETURN_STATUS: ${ZENDESK_FIELD_RETURN_STATUS}
+            ZENDESK_FIELD_SPA_MANAGER_EMAIL: ${ZENDESK_FIELD_SPA_MANAGER_EMAIL}
+            CALLBACK_SPA_MANAGER_EMAIL_OVERRIDE: ${CALLBACK_SPA_MANAGER_EMAIL_OVERRIDE}
+            CALLBACK_UPLOAD_API_URL: ${CALLBACK_UPLOAD_API_URL}
+            CALLBACK_UPLOAD_API_KEY: ${CALLBACK_UPLOAD_API_KEY}
+            REDRIVE_API_URL: ${REDRIVE_API_URL}
+            REDRIVE_API_KEY: ${REDRIVE_API_KEY}
+        codeConfiguration:
+            dependencyResolution: remote_build
+            entryPoint: callback_main.py
+            runtime: python_3_13
+        container:
+            resources:
+                cpu: "0.5"
+                memory: 1Gi
+        kind: hosted
+        name: marina-callback
+        displayName: Marina document callback
+        description: "Receives document events from the OneSpaWorld document service and updates the matching Zendesk ticket: attaches the document, tags the ticket, adds an internal comment."
+        protocols:
+            - protocol: responses
+              version: 2.0.0
 infra:
     provider: microsoft.foundry

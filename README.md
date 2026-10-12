@@ -115,6 +115,7 @@ At the upload question, type `skip`, or attach a file **link** (`/attach https:/
     │       ├── purchase_details.py Purchaser name, cabin, purchase date, delivery type, return reason, country, phone, cancel
     │       ├── product_details.py  Product count, product list (slots and questions), confirmation, saving for the ticket
     │       ├── ticket.py           "Anything else?", file upload, ticket creation, private notes, documents, thank-you
+    │       ├── feedback.py         Satisfaction question (1-5, comment for 1-3) after the ticket; saved and added to the ticket as a private note
     │       ├── return_documents.py Document validation, the two document payloads, the failure notes (pure functions)
     │       ├── return_extraction.py  Reads the second extraction (cabin, date, phone, country, products) into the notes
     │       └── prompts/            Prompt text copied from Kore, one .md per prompt node

@@ -147,3 +147,30 @@ class ZendeskClient:
         body = await self._request("GET", "/api/v2/tickets.json", params={"external_id": external_id})
         tickets = body.get("tickets") if isinstance(body, dict) else None
         return int(tickets[0]["id"]) if tickets else None
+
+    # ---- what the document-event callback needs -------------------------------------------------------------------
+    async def add_tags(self, ticket_id: int, tags: list[str]) -> None:
+        """Adds the tags to the ticket (PUT adds; it never removes the ticket's existing tags)."""
+        await self._request("PUT", f"/api/v2/tickets/{int(ticket_id)}/tags", json={"tags": tags})
+
+    async def update_ticket(self, ticket_id: int, html_body: str, uploads: list[str] | None = None,
+                            custom_fields: list[dict[str, Any]] | None = None) -> Any:
+        """Adds a private comment (optionally with uploaded files) and sets custom fields. Returns Zendesk's reply."""
+        comment: dict[str, Any] = {"html_body": html_body, "public": False}
+        if uploads:
+            comment["uploads"] = uploads
+        ticket: dict[str, Any] = {"comment": comment}
+        if custom_fields:
+            ticket["custom_fields"] = custom_fields
+        return await self._request("PUT", f"/api/v2/tickets/{int(ticket_id)}.json", json={"ticket": ticket})
+
+    async def get_ticket(self, ticket_id: int) -> dict[str, Any]:
+        body = await self._request("GET", f"/api/v2/tickets/{int(ticket_id)}.json")
+        ticket = body.get("ticket") if isinstance(body, dict) else None
+        if not isinstance(ticket, dict):
+            raise ZendeskError("Zendesk returned no ticket")
+        return ticket
+
+    async def create_or_update_user(self, email: str, name: str) -> None:
+        await self._request("POST", "/api/v2/users/create_or_update",
+                            json={"user": {"email": email, "name": name, "role": "end-user", "skip_verify_email": True}})

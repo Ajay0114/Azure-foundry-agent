@@ -33,6 +33,7 @@ from typing import Any
 
 from agent_framework import Executor, WorkflowContext, handler
 
+from dialogs.product_return.feedback import PD_FEEDBACK, Feedback
 from dialogs.product_return.purchase_details import (MSG_CONTINUE_WITHOUT, PurchaseDetailsState, QuestionNode,
                                                      is_resolved)
 from dialogs.product_return.return_documents import (apply_validation, build_returns_payload,
@@ -45,7 +46,7 @@ from shared.attachments import AttachmentBlocked, AttachmentError
 from shared.dates import read_yes_no, says_skip
 from shared.deps import Deps
 from shared.documents import DocumentError
-from shared.flow import connect, finish
+from shared.flow import connect, finish, goto
 from shared.htmltext import esc
 from shared.validators import says_finished
 from shared.zendesk import TicketSettings, ZendeskApi, ZendeskError
@@ -377,7 +378,7 @@ class FinaliseRequest(Executor):
                 await self._request(turn, kind, getattr(documents, name), make(s, ticket_id))
         pii = s.get("piiEntities") or {}
         turn.say(msg_thanks(_text(pii.get("name"), "there"), ticket_id, _text(pii.get("emailId"), "your email")))
-        await finish(ctx, turn)
+        await goto(ctx, turn, PD_FEEDBACK)                      # then the satisfaction question
 
 
 # ============================================================================================
@@ -394,9 +395,11 @@ def build_ticket_nodes(deps: Deps, cancel: Executor) -> TicketNodes:
     upload = UploadFiles(deps, PD_CREATE_TICKET)
     create = CreateTicket(deps)
     finalise = FinaliseRequest(deps)
-    edges = [(additional, upload), (upload, create), (create, finalise), (additional, cancel), (upload, cancel)]
-    pauses = [additional, upload, create]
-    return TicketNodes(start=additional, last=finalise, pause_nodes=pauses, outputs=[*pauses, finalise], edges=edges)
+    feedback = Feedback(deps)
+    edges = [(additional, upload), (upload, create), (create, finalise), (finalise, feedback), (additional, cancel),
+             (upload, cancel)]
+    pauses = [additional, upload, create, feedback]
+    return TicketNodes(start=additional, last=feedback, pause_nodes=pauses, outputs=[*pauses, finalise], edges=edges)
 
 
 def connect_ticket_nodes(builder: Any, nodes: TicketNodes) -> None:

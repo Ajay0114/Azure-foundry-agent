@@ -290,6 +290,16 @@ class OswClient:
         exact = [v for v in vessels if v.name.lower() == text.lower()]
         return exact or vessels
 
+    async def vessel_manager_email(self, ship_name: str) -> str | None:
+        """The SPA manager's e-mail on the vessel record with this name (the document callback puts it in the ticket)."""
+        text = rql_text(ship_name)
+        if not text:
+            return None
+        payload = await self.get_json("/info/vessels", self._cfg.vessels_scope, params={"filter": f'co(name,"{text}")'})
+        items = extract_items(payload)
+        email = str(items[0].get("email") or "").strip() if items else ""
+        return email if "@" in email else None
+
     # ---- itinerary -------------------------------------------------------------------------
     async def _voyages(self, path: str) -> list[Voyage]:
         payload = await self.get_json(path, self._cfg.itinerary_scope, allow_404=True)

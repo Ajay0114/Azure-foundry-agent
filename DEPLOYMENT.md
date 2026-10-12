@@ -237,6 +237,42 @@ the real services yet, so watch the first live run closely.
 - To go back, deploy the previous commit again (or select the earlier version in the portal, per the manage guide).
 - Conversations in progress survive a deploy because their state is in Blob Storage, not in the container.
 
+## The document-event callback (second agent, `marina-callback`)
+
+OneSpaWorld's document service sends an event for each step of a document request (Marina requests the documents when it
+creates the ticket). The `marina-callback` agent receives them and updates the ticket: `DocumentCreated` attaches the
+document and tags the ticket; every other event adds a tag `<requestType>_<eventType>` and an internal comment; 
+`DocumentsSearchDelegated` also puts the vessel's SPA manager e-mail in the ticket. It replaces the Kore CallBackAgent. It runs
+`callback_main.py` from the same code package, with no model, and it is a separate agent so customers' chat can never reach it.
+
+Settings (added to `src/marina-bot/.env` before `bash scripts/set-azd-env.sh`; all in `.env.example`):
+`ZENDESK_FIELD_SPA_MANAGER_EMAIL` (ticket field id), `CALLBACK_UPLOAD_API_URL` and `CALLBACK_UPLOAD_API_KEY` (the function that
+turns a document id into a Zendesk upload token: **not** the `ATTACHMENT_API_*` file-scan function), `REDRIVE_API_URL` and
+`REDRIVE_API_KEY` (the retry queue function), and, for test environments only, `CALLBACK_SPA_MANAGER_EMAIL_OVERRIDE`. It reuses
+the Zendesk and OSW settings. The keys are secrets.
+
+Deploy it the way you deployed the first agent, naming the service:
+`azd deploy marina-callback`, then `azd ai agent show marina-callback`. Its identity needs the same storage role as the bot
+(it records processed event ids so a re-delivered event is not applied twice).
+
+**What the OneSpaWorld team calls** (replaces the Kore agentic app endpoint):
+
+```
+POST https://marina-poc.services.ai.azure.com/api/projects/proj-default/agents/marina-callback/endpoint/protocols/openai/responses?api-version=v1
+Authorization: Bearer <Entra access token, scope https://ai.azure.com/.default>
+Content-Type: application/json
+
+{"input": "<the event, as a JSON string>"}
+```
+
+The event is the same JSON they send today (`id, eventType, requestType, scope, requestId, requestReferenceId, documentId,
+createdAt, metadata`; `requestReferenceId` is the Zendesk ticket id). Like Kore's "202 processing", the agent only acknowledges:
+the answer comes back at once, and its output text is `{"status": "accepted", "message": "Event received and is being processed",
+"eventId": ..., "ticketId": ...}`. The ticket work happens after that and its outcome (success, duplicate, queued_for_retry,
+failed) is written to the log, not sent to the caller. A message that is not a usable event is answered `{"status": "rejected",
+"error": ...}` so the sender can fix it. For testing from Postman, set `CALLBACK_WAIT_FOR_RESULT=true` to get the outcome in the answer.
+Their caller needs an Entra service principal with the **Azure AI User** role on the Foundry project (an admin assigns it).
+
 ## Troubleshooting
 
 | Symptom | Likely cause and fix |
