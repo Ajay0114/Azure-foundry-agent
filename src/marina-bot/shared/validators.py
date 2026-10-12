@@ -14,11 +14,16 @@ _NAME_TOKEN = re.compile(r"^[A-Za-z][A-Za-z'’.\-]*$")
 _EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
 
-def parse_full_name(text: str) -> str | None:
-    """First and last name required (matches the Kore error message). Returns None if not a name."""
+_NOT_A_NAME = {"no", "yes", "y", "n", "ok", "okay", "hi", "hello", "hey", "skip", "help", "none", "nope", "yeah", "thanks", "thank"}
+
+
+def parse_name(text: str) -> str | None:
+    """A first name, a last name, or both (up to five words). Returns None if it is not a name."""
     cleaned = _NAME_PREFIX.sub("", (text or "").strip()).strip(" .")
     tokens = cleaned.split()
-    if not (2 <= len(tokens) <= 5):
+    if not (1 <= len(tokens) <= 5):
+        return None
+    if len(tokens) == 1 and (len(tokens[0]) < 2 or tokens[0].lower() in _NOT_A_NAME):     # "n", "no", "hello" are not names
         return None
     if not all(_NAME_TOKEN.match(t) for t in tokens):
         return None

@@ -29,6 +29,7 @@ from agent_framework import Executor, WorkflowContext, handler
 from dialogs.product_return.purchase_details import (MSG_CONTINUE_WITHOUT, PurchaseDetailsState,
                                                      QuestionNode, is_resolved)
 from models import Turn
+from shared import trace
 from shared.cancel import is_cancel_request
 from shared.dates import read_yes_no, says_skip
 from shared.deps import Deps
@@ -304,7 +305,9 @@ class ProductCountNode(QuestionNode):
     async def _read(self, turn: Turn, slots: list[Slot]) -> ProductReading | None:
         if self._deps.read_products is None:
             return None
-        return await self._deps.read_products(turn.text, "how many items in total are being returned", describe(slots))
+        return await trace.call(turn, "llm", "product_reader",
+                                self._deps.read_products(turn.text, "how many items in total are being returned", describe(slots)),
+                                lambda r: f"{len(r.products) if r else 0} product(s) read")
 
 
 class ProductDetailsNode(QuestionNode):
@@ -348,7 +351,9 @@ class ProductDetailsNode(QuestionNode):
         reading = shortcut_reading(turn.text, slots, st.asked)
         if reading is None and not (finished and not slots):
             if self._deps.read_products is not None:
-                reading = await self._deps.read_products(turn.text, describe_question(slots, st.asked), describe(slots))
+                reading = await trace.call(turn, "llm", "product_reader",
+                                           self._deps.read_products(turn.text, describe_question(slots, st.asked), describe(slots)),
+                                           lambda r: f"{len(r.products) if r else 0} product(s) read")
         changed = apply_reading(slots, reading, st.asked) if reading else False
         finished = finished or bool(reading and reading.finished)
 
@@ -412,7 +417,7 @@ class ConfirmProducts(QuestionNode):
             await self._continue(ctx, turn, st)                  # nothing to confirm: the save step records "nothing submittable"
             return
         if not turn.resuming:
-            await self._ask(ctx, turn, st, *self._prompt(slots))
+            await self._ask(ctx, turn, st, *self._prompt(slots), suggest=["Yes", "No"])
             return
         turn.resuming = False
         if is_cancel_request(turn.text):
@@ -420,7 +425,7 @@ class ConfirmProducts(QuestionNode):
             return
         answer = read_yes_no(turn.text)
         if answer is None:
-            await self._ask(ctx, turn, st, MSG_DIDNT_CATCH, *self._prompt(slots))
+            await self._ask(ctx, turn, st, MSG_DIDNT_CATCH, *self._prompt(slots), suggest=["Yes", "No"])
             return
         if not answer:
             st.save(turn.session)

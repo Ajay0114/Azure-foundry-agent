@@ -29,6 +29,7 @@ from agent_framework import Executor, WorkflowContext, handler
 
 from dialogs.product_return.vessel import is_valid_vessel_id
 from models import Turn
+from shared import trace
 from shared.dates import DateReading, PartialDate, is_future, read_text
 from shared.deps import Deps
 from shared.flow import connect, goto, pause
@@ -154,12 +155,14 @@ def route_end_or_finish(st: CruiseDatesState, today: date) -> str:
     return CD_ASK_END
 
 
-async def interpret(deps: Deps, text: str, field_name: str) -> DateReading:
+async def interpret(deps: Deps, text: str, field_name: str, turn: Turn | None = None) -> DateReading:
     """Deterministic parser first; the model only for replies the parser cannot read."""
     reading = read_text(text)
     if reading.kind == "unclear" and deps.read_dates is not None:
         try:
-            smarter = await deps.read_dates(text, field_name)
+            call = deps.read_dates(text, field_name)
+            smarter = await (trace.call(turn, "llm", "date_reader", call, lambda r: f"read as {r.kind if r else 'nothing'}")
+                             if turn is not None else call)
         except Exception:                       # a model failure must never break the conversation
             log.exception("date reader failed; treating the reply as unclear")
             smarter = None
@@ -252,7 +255,7 @@ class AskDate(Executor):
     async def _answer(self, ctx: Any, turn: Turn, st: CruiseDatesState, today: date) -> None:
         f = self._field
         turn.resuming = False                      # the reply is consumed here; the next node must not reuse it
-        reading = await interpret(self._deps, turn.text, f)
+        reading = await interpret(self._deps, turn.text, f, turn)
 
         if reading.kind in ("skip", "no"):                                # "no" to a date question = don't know
             st.skipped.append(f)
@@ -358,7 +361,8 @@ class CruiseDatesLookup(Executor):
         st = CruiseDatesState.load(turn.session)
         vessel = vessel_id_of(turn)
         try:
-            match = await self._deps.osw.find_voyage(vessel, st.start)
+            match = await trace.call(turn, "api", "osw.find_voyage", self._deps.osw.find_voyage(vessel, st.start),
+                                     lambda m: f"{st.start}: {m.kind} match")
         except Exception:
             log.exception("voyage lookup failed for vessel %s on %s; continuing without validation", vessel, st.start)
             st.lookup = "unavailable"
@@ -398,12 +402,13 @@ class ConfirmNearest(Executor):
             return
         if not turn.resuming:
             turn.say(msg_suggestion(st.suggestion))
+            turn.suggest("Yes", "No")
             st.save(turn.session)
             await pause(ctx, turn, self.id)
             return
 
         turn.resuming = False                          # the reply is consumed here; the next node must not reuse it
-        reading = await interpret(self._deps, turn.text, START)
+        reading = await interpret(self._deps, turn.text, START, turn)
         if reading.kind == "yes":
             await self._accept(ctx, turn, st, today)
         elif reading.kind == "dates" and reading.start is not None:
@@ -417,6 +422,7 @@ class ConfirmNearest(Executor):
                 return
             turn.say(MSG_YES_NO)
             turn.say(msg_suggestion(st.suggestion))
+            turn.suggest("Yes", "No")
             st.save(turn.session)
             await pause(ctx, turn, self.id)
 

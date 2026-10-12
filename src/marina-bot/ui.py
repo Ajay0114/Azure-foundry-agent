@@ -1,169 +1,84 @@
-"""A small web chat page for the local bot (stdlib only, like chat.py).
+"""Local server for the Marina chat widget (web/) and its developer debug panel.
 
-Usage:   python3 ui.py             then open http://localhost:8000   (the bot must be running on :8088)
+Run it from src/marina-bot with the project's Python (it reads the same conversation state as the bot):
 
-The page is served from here and its messages are forwarded to the bot's /responses endpoint, so the browser never
-talks to the bot directly (no cross-origin problems). It keeps the conversation the same way chat.py does: the id of the
-last response and the session id the bot hands back. "Attach a file link" adds an https link that is sent with your
-next message (the attachment service downloads it, so it must be a link, not a file from your disk).
+    uv run --no-sync python ui.py                      the widget on a demo page:      http://localhost:8000
+    UI_DEBUG=true uv run --no-sync python ui.py        also the developer page:        http://localhost:8000/dev
 
-Settings (optional environment variables):  BOT_URL (default http://localhost:8088/responses), UI_PORT (default 8000).
-Local use only: it listens on 127.0.0.1 and has no login.
+What it does
+  * serves web/ (the embeddable widget, the demo page, and, only with UI_DEBUG, the developer page);
+  * POST /api/chat    forwards the customer's message to the bot and returns the reply plus the buttons to offer;
+  * GET  /api/debug   (UI_DEBUG only) the execution trace and the conversation variables, for the debug panel.
+
+This server is the "backend for the front end": the browser never talks to the bot or to Azure. Embedding the widget in a real
+site means running something like this on your side (with its own login to the bot) and pointing the widget at it. The widget
+itself (web/widget.js, web/widget.css) contains no debug code.
+
+Settings (environment variables, all optional)
+  BOT_URL      where the bot answers. Default http://localhost:8088/responses. For the deployed agent use its endpoint:
+               https://<account>.services.ai.azure.com/api/projects/<project>/agents/<agent>/endpoint/protocols/openai/responses?api-version=v1
+  BOT_AUTH     "none" (default for localhost) or "azure": send an Azure token (your az login) to the bot. Default: azure when BOT_URL is not local.
+  UI_PORT      default 8000
+  UI_DEBUG     "true" to enable /dev and /api/debug. The debug data holds what customers typed: use it in dev and test only.
+  UI_HOST      default 127.0.0.1. Local use only: there is no login on this server.
+The conversation state (for the buttons and the debug panel) is read with the same settings as the bot (STATE_BLOB_* / MARINA_STATE_DIR).
 """
 
 import json
+import mimetypes
 import os
+import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
+WEB = Path(__file__).parent / "web"
 BOT_URL = os.environ.get("BOT_URL", "http://localhost:8088/responses")
 PORT = int(os.environ.get("UI_PORT", "8000"))
+HOST = os.environ.get("UI_HOST", "127.0.0.1")
+DEBUG = os.environ.get("UI_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
+IS_LOCAL = urlparse(BOT_URL).hostname in ("localhost", "127.0.0.1", "::1")
+AUTH = (os.environ.get("BOT_AUTH") or ("none" if IS_LOCAL else "azure")).strip().lower()
 MAX_BODY = 64 * 1024
+TOKEN_SCOPE = "https://ai.azure.com/.default"
+NOISY = {"messages", "transcript", "transcript_rows", "conversationHistoryString", "nodeOutputs", "debug_turns", "suggestions"}
 
-PAGE = r"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Marina</title>
-<style>
-  :root {
-    --bg: #f4f6f8; --panel: #ffffff; --text: #1d2733; --muted: #6b7785; --line: #e2e7ec;
-    --bot: #eef2f6; --user: #0b6b7a; --user-text: #ffffff; --accent: #0b6b7a; --danger: #b3261e;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #11161b; --panel: #1a2128; --text: #e6ebf0; --muted: #93a0ad; --line: #2a343d;
-            --bot: #242d36; --user: #1f8a9b; --user-text: #ffffff; --accent: #4fb3c2; --danger: #f2b8b5; }
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
-         height: 100vh; display: flex; justify-content: center; }
-  .app { width: 100%; max-width: 760px; display: flex; flex-direction: column; background: var(--panel);
-         border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
-  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px;
-           border-bottom: 1px solid var(--line); }
-  header h1 { font-size: 16px; margin: 0; }
-  header small { color: var(--muted); display: block; font-weight: normal; }
-  button { font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--line); background: var(--panel);
-           color: var(--text); padding: 7px 12px; }
-  button:hover { border-color: var(--accent); }
-  button.primary { background: var(--accent); border-color: var(--accent); color: var(--user-text); }
-  button:disabled { opacity: .5; cursor: default; }
-  #log { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
-  .msg { max-width: 82%; padding: 10px 14px; border-radius: 14px; white-space: normal; overflow-wrap: anywhere; }
-  .bot { background: var(--bot); align-self: flex-start; border-bottom-left-radius: 4px; }
-  .user { background: var(--user); color: var(--user-text); align-self: flex-end; border-bottom-right-radius: 4px; }
-  .err { background: transparent; border: 1px solid var(--danger); color: var(--danger); align-self: center; font-size: 13px; }
-  .note { align-self: center; color: var(--muted); font-size: 12px; }
-  .dots span { display: inline-block; width: 6px; height: 6px; margin: 0 2px; border-radius: 50%; background: var(--muted);
-               animation: blink 1.2s infinite; }
-  .dots span:nth-child(2) { animation-delay: .2s; } .dots span:nth-child(3) { animation-delay: .4s; }
-  @keyframes blink { 0%, 80%, 100% { opacity: .2; } 40% { opacity: 1; } }
-  footer { border-top: 1px solid var(--line); padding: 12px 18px; display: flex; flex-direction: column; gap: 8px; }
-  #chips { display: flex; flex-wrap: wrap; gap: 6px; }
-  .chip { font-size: 12px; background: var(--bot); border-radius: 999px; padding: 3px 10px; display: flex; gap: 6px; align-items: center; }
-  .chip button { border: 0; padding: 0 2px; background: none; color: var(--muted); }
-  .row { display: flex; gap: 8px; }
-  #attachRow { display: none; }
-  input[type=text], input[type=url] { flex: 1; font: inherit; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line);
-                                      background: var(--bg); color: var(--text); }
-  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-</style>
-</head>
-<body>
-<div class="app">
-  <header>
-    <h1>Marina <small>OneSpaWorld product returns (local test)</small></h1>
-    <button id="newBtn" title="Start a new conversation">New conversation</button>
-  </header>
-  <div id="log" aria-live="polite"></div>
-  <footer>
-    <div id="chips"></div>
-    <div class="row" id="attachRow">
-      <input type="url" id="fileUrl" placeholder="https://… link to the file">
-      <button id="addBtn">Add</button>
-    </div>
-    <div class="row">
-      <button id="attachBtn" title="Attach a file link">📎</button>
-      <input type="text" id="box" placeholder="Type a message" autocomplete="off" autofocus>
-      <button class="primary" id="sendBtn">Send</button>
-    </div>
-  </footer>
-</div>
-<script>
-  const log = document.getElementById("log"), box = document.getElementById("box"), sendBtn = document.getElementById("sendBtn");
-  const chips = document.getElementById("chips"), attachRow = document.getElementById("attachRow"), fileUrl = document.getElementById("fileUrl");
-  let previous = null, session = null, files = [], busy = false;
+_store = None
+_store_error = ""
+_token: tuple[str, float] | None = None
+_lock = threading.Lock()
 
-  function escapeHtml(s) { return s.replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c])); }
-  // The bot writes *bold* and plain line breaks; everything else is shown as typed.
-  function render(text) { return escapeHtml(text).replace(/\*([^*\n]+)\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>"); }
 
-  function add(kind, text) {
-    const div = document.createElement("div");
-    div.className = "msg " + kind;
-    if (kind === "user") div.textContent = text; else div.innerHTML = render(text);
-    log.appendChild(div); log.scrollTop = log.scrollHeight;
-    return div;
-  }
-  function note(text) { const d = document.createElement("div"); d.className = "note"; d.textContent = text; log.appendChild(d); }
+def state_store():
+    """The conversation state, read with the bot's own settings. None (with a reason) when it cannot be reached."""
+    global _store, _store_error
+    if _store is None and not _store_error:
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(Path(__file__).parent / ".env")
+            from shared.state_store import make_state_store
+            _store = make_state_store()
+        except Exception as exc:                                # noqa: BLE001  (no store: the chat still works, without buttons)
+            _store_error = f"{type(exc).__name__}: {exc}"
+    return _store
 
-  function drawChips() {
-    chips.innerHTML = "";
-    files.forEach((u, i) => {
-      const c = document.createElement("span"); c.className = "chip";
-      c.append("📎 " + (u.split("/").pop() || u).slice(0, 40));
-      const x = document.createElement("button"); x.textContent = "×"; x.title = "Remove";
-      x.onclick = () => { files.splice(i, 1); drawChips(); };
-      c.appendChild(x); chips.appendChild(c);
-    });
-  }
 
-  async function send() {
-    const text = box.value.trim();
-    if (busy || (!text && !files.length)) return;
-    busy = true; sendBtn.disabled = true;
-    add("user", text + (files.length ? "\n" + files.map(u => "📎 " + u).join("\n") : ""));
-    const sentFiles = files; files = []; drawChips(); box.value = "";
-    const typing = add("bot", ""); typing.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>';
-    try {
-      const res = await fetch("/chat", {method: "POST", headers: {"Content-Type": "application/json"},
-                                        body: JSON.stringify({text: text || "(file)", files: sentFiles, previous, session})});
-      const data = await res.json();
-      typing.remove();
-      if (data.error) { add("err", data.error); }
-      else { previous = data.id; session = data.session || session; add("bot", data.reply || "(no reply)"); }
-    } catch (e) {
-      typing.remove(); add("err", "Could not reach the chat page server: " + e.message);
-    } finally { busy = false; sendBtn.disabled = false; box.focus(); }
-  }
-
-  function reset() {
-    previous = session = null; files = []; drawChips(); log.innerHTML = "";
-    note("New conversation. Say what you would like to return.");
-  }
-
-  document.getElementById("newBtn").onclick = reset;
-  sendBtn.onclick = send;
-  box.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
-  document.getElementById("attachBtn").onclick = () => { attachRow.style.display = attachRow.style.display === "flex" ? "none" : "flex"; fileUrl.focus(); };
-  function addFile() {
-    const u = fileUrl.value.trim();
-    if (!/^https:\/\/\S+$/i.test(u)) { fileUrl.setCustomValidity("Use an https:// link"); fileUrl.reportValidity(); return; }
-    fileUrl.setCustomValidity(""); files.push(u); fileUrl.value = ""; drawChips(); box.focus();
-  }
-  document.getElementById("addBtn").onclick = addFile;
-  fileUrl.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); addFile(); } });
-  reset();
-</script>
-</body>
-</html>
-"""
+def bearer() -> str:
+    """An Azure access token for the deployed agent, cached until shortly before it expires."""
+    global _token
+    with _lock:
+        if _token is None or time.time() > _token[1] - 120:
+            from azure.identity import DefaultAzureCredential
+            access = DefaultAzureCredential().get_token(TOKEN_SCOPE)
+            _token = (access.token, float(access.expires_on))
+        return _token[0]
 
 
 def ask_bot(body: dict) -> dict:
-    """Forward one chat turn to the bot's Responses endpoint and flatten the answer for the page."""
+    """Forward one chat turn to the bot's Responses endpoint and flatten the answer for the widget."""
     text, files = str(body.get("text") or ""), [u for u in body.get("files") or [] if isinstance(u, str)]
     content = [{"type": "input_text", "text": text}] + [{"type": "input_file", "file_url": u} for u in files]
     request = {"input": [{"role": "user", "content": content}] if files else text, "stream": False}
@@ -171,20 +86,52 @@ def ask_bot(body: dict) -> dict:
         request["previous_response_id"] = body["previous"]
     if body.get("session"):
         request["agent_session_id"] = body["session"]        # the host scopes saved workflow state by session
-    req = urllib.request.Request(BOT_URL, data=json.dumps(request).encode(), headers={"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json"}
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        if AUTH == "azure":
+            headers["Authorization"] = f"Bearer {bearer()}"
+        req = urllib.request.Request(BOT_URL, data=json.dumps(request).encode(), headers=headers)
+        with urllib.request.urlopen(req, timeout=180) as resp:
             data = json.load(resp)
+            header_session = resp.headers.get("x-agent-session-id") or resp.headers.get("x-ms-agent-session-id")
     except urllib.error.HTTPError as exc:
         return {"error": f"The bot answered with HTTP {exc.code}."}
     except (urllib.error.URLError, TimeoutError, ConnectionError):
-        return {"error": f"The bot is not reachable at {BOT_URL}. Start it with: uv run --no-sync python main.py"}
-    parts = [c.get("text", "") for item in data.get("output") or [] for c in item.get("content") or []
-             if c.get("type") == "output_text"]
-    err = (data.get("error") or {}).get("message")
-    if err:
-        return {"error": err}
-    return {"reply": "\n".join(parts), "id": data.get("id"), "session": data.get("agent_session_id")}
+        return {"error": f"The bot is not reachable at {urlparse(BOT_URL)._replace(query='').geturl()}."}
+    except Exception as exc:                                     # noqa: BLE001  (a token problem, for example)
+        return {"error": f"Could not call the bot: {type(exc).__name__}."}
+    parts = [c.get("text", "") for item in data.get("output") or [] for c in item.get("content") or [] if c.get("type") == "output_text"]
+    if (data.get("error") or {}).get("message"):
+        return {"error": data["error"]["message"]}
+    session = data.get("agent_session_id") or header_session or body.get("session")
+    return {"reply": "\n".join(parts), "previous": data.get("id"), "session": session, "suggestions": suggestions_for(session, data.get("id"))}
+
+
+def load_state(*keys: str | None) -> dict | None:
+    keys = [k for k in keys if k]
+    store = state_store() if keys else None
+    if store is None:
+        return None
+    try:
+        return store.load(keys) or None
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
+def suggestions_for(*keys: str | None) -> list[str]:
+    state = load_state(*keys)
+    labels = ((state or {}).get("session") or {}).get("suggestions") or []
+    return [str(label) for label in labels][:8]
+
+
+def debug_for(*keys: str | None) -> dict:
+    state = load_state(*keys)
+    if state is None:
+        return {"available": False, "reason": _store_error or "No saved state for this conversation yet.", "turns": [], "variables": {}}
+    s = state.get("session") or {}
+    return {"available": True, "turns": s.get("debug_turns") or [],
+            "variables": {"session": {k: v for k, v in s.items() if k not in NOISY}, "entities": state.get("entities") or {}},
+            "tracing": bool(s.get("debug_turns"))}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -193,17 +140,42 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
+    def _json(self, status: int, data: dict) -> None:
+        self._send(status, json.dumps(data).encode(), "application/json")
+
+    def _file(self, name: str) -> None:
+        path = (WEB / name).resolve()
+        if WEB.resolve() not in path.parents or not path.is_file() or (name == "dev.html" and not DEBUG):
+            self._send(404, b"Not found", "text/plain")
+            return
+        kind = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        self._send(200, path.read_bytes(), f"{kind}; charset=utf-8" if kind.startswith(("text/", "application/javascript")) else kind)
+
     def do_GET(self) -> None:
-        if self.path.split("?")[0] == "/":
-            self._send(200, PAGE.encode(), "text/html; charset=utf-8")
+        url = urlparse(self.path)
+        if url.path == "/":
+            self._file("demo.html")
+        elif url.path == "/dev":
+            self._file("dev.html")
+        elif url.path == "/api/config":
+            self._json(200, {"debug": DEBUG, "botUrl": urlparse(BOT_URL)._replace(query="").geturl(), "auth": AUTH})
+        elif url.path == "/api/debug":
+            if not DEBUG:
+                self._send(404, b"Not found", "text/plain")
+            else:
+                query = parse_qs(url.query)
+                self._json(200, debug_for(*(query.get(k, [None])[0] for k in ("session", "previous"))))
+        elif url.path.lstrip("/") in {"widget.js", "widget.css"} or url.path.lstrip("/").startswith("assets/"):
+            self._file(url.path.lstrip("/"))
         else:
             self._send(404, b"Not found", "text/plain")
 
     def do_POST(self) -> None:
-        if self.path != "/chat":
+        if urlparse(self.path).path != "/api/chat":
             self._send(404, b"Not found", "text/plain")
             return
         try:
@@ -212,9 +184,9 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ValueError
         except (ValueError, json.JSONDecodeError):
-            self._send(400, json.dumps({"error": "Bad request."}).encode(), "application/json")
+            self._json(400, {"error": "Bad request."})
             return
-        self._send(200, json.dumps(ask_bot(body)).encode(), "application/json")
+        self._json(200, ask_bot(body))
 
     def log_message(self, fmt: str, *args) -> None:        # keep the terminal quiet (messages can hold customer details)
         pass
@@ -222,11 +194,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+        server = ThreadingHTTPServer((HOST, PORT), Handler)
     except OSError as exc:
-        raise SystemExit(f"Cannot listen on port {PORT} ({exc.strerror}). Something else is using it, or an earlier "
-                         f"ui.py is still running. Pick another port:  UI_PORT=8010 python3 ui.py")
-    print(f"Marina chat page: http://localhost:{PORT}   (bot: {BOT_URL})   Ctrl+C to stop")
+        raise SystemExit(f"Cannot listen on port {PORT} ({exc.strerror}). Something else is using it, or an earlier ui.py is still "
+                         f"running. Pick another port:  UI_PORT=8010 uv run --no-sync python ui.py")
+    print(f"Marina chat widget:  http://localhost:{PORT}" + (f"   developer page: http://localhost:{PORT}/dev" if DEBUG else ""))
+    print(f"bot: {urlparse(BOT_URL)._replace(query='').geturl()}  (auth: {AUTH})   Ctrl+C to stop")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -115,6 +115,7 @@ def msg_date_outside(start: str, end: str) -> str:
     return f"That date appears to be outside your cruise dates ({start} to {end})."
 
 
+DELIVERY_CHOICES = ["Onboard Purchase", "Home Delivery"]
 MSG_DELIVERY = "Was this product bought while you were on the ship, or was it a Home Delivery order?"
 MSG_DELIVERY_INVALID = ("I'm sorry, I did not recognize the value you have entered. Please select a value from the list: "
                         "Onboard Purchase or Home Delivery.")
@@ -232,9 +233,10 @@ class QuestionNode(Executor):
         turn.resuming = False
         await goto(ctx, turn, self._next)
 
-    async def _ask(self, ctx: Any, turn: Turn, st: PurchaseDetailsState, *lines: str) -> None:
+    async def _ask(self, ctx: Any, turn: Turn, st: PurchaseDetailsState, *lines: str, suggest: list[str] | None = None) -> None:
         for line in lines:
             turn.say(line)
+        turn.suggest(*(suggest or []))
         st.save(turn.session)
         await pause(ctx, turn, self.id)
 
@@ -480,7 +482,7 @@ class DeliveryType(QuestionNode):
     async def run(self, turn: Turn, ctx: WorkflowContext[Turn, Turn]) -> None:
         st = PurchaseDetailsState.load(turn.session)
         if not turn.resuming:
-            await self._ask(ctx, turn, st, MSG_DELIVERY)
+            await self._ask(ctx, turn, st, MSG_DELIVERY, suggest=DELIVERY_CHOICES)
             return
         turn.resuming = False
         if is_cancel_request(turn.text):
@@ -489,7 +491,7 @@ class DeliveryType(QuestionNode):
         choice = parse_delivery_type(turn.text)
         if choice is None:
             if st.count(st.failures, "delivery") < MAX_CHOICE_ATTEMPTS:
-                await self._ask(ctx, turn, st, MSG_DELIVERY_INVALID)
+                await self._ask(ctx, turn, st, MSG_DELIVERY_INVALID, suggest=DELIVERY_CHOICES)
                 return
             turn.say(MSG_CONTINUE_WITHOUT)
             choice = "Not Provided"
@@ -508,7 +510,7 @@ class ReturnReason(QuestionNode):
     async def run(self, turn: Turn, ctx: WorkflowContext[Turn, Turn]) -> None:
         st, s = PurchaseDetailsState.load(turn.session), turn.session
         if not turn.resuming:
-            await self._ask(ctx, turn, st, msg_reason_choices())
+            await self._ask(ctx, turn, st, msg_reason_choices(), suggest=[r.title for r in RETURN_REASONS])
             return
         turn.resuming = False
         if is_cancel_request(turn.text):
@@ -517,7 +519,7 @@ class ReturnReason(QuestionNode):
         reason = parse_return_reason(turn.text)
         if reason is None:
             if st.count(st.failures, "reason") < MAX_CHOICE_ATTEMPTS:
-                await self._ask(ctx, turn, st, MSG_REASON_INVALID, msg_reason_choices())
+                await self._ask(ctx, turn, st, MSG_REASON_INVALID, msg_reason_choices(), suggest=[r.title for r in RETURN_REASONS])
                 return
             turn.say(MSG_CONTINUE_WITHOUT)
             reason = RETURN_REASONS[-1]

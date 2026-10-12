@@ -15,7 +15,7 @@ check the official guide: these steps were prepared from the samples and have no
 | Settings from `.env` | `.env` is not shipped | Settings are passed as the agent's environment variables from `azure.yaml` (step 3) |
 | State in files under `~/marina_state` | Containers restart, scale and expire sessions | State lives in **Azure Blob Storage** (`BlobStateStore`, steps 1 and 4) |
 | `FOUNDRY_PROJECT_ENDPOINT` from `.env` | Injected by Foundry | Nothing to set |
-| `chat.py`, `ui.py` | Not deployed | Test with the Foundry Agent Playground or `azd ai agent invoke` |
+| `chat.py`, `ui.py`, `web/` | Not deployed | Test with the Foundry Agent Playground or `azd ai agent invoke` |
 
 Files added for this: `azure.yaml` (repo root), `src/marina-bot/Dockerfile`, `.dockerignore`, `.azdignore`,
 `scripts/set-azd-env.sh`, and the Blob state store in `src/marina-bot/shared/state_store.py`.
@@ -248,7 +248,8 @@ the real services yet, so watch the first live run closely.
 | Each message starts a new conversation | State is not persisting: check the log line at start-up and that `STATE_BLOB_ACCOUNT_URL` reached the agent (`azd env get-values` shows names; the value is in `.azure/<env>/.env`) |
 | A build error about dependencies | `cd src/marina-bot && uv lock`, commit `uv.lock`, redeploy |
 | Zendesk answers 401 or 422 in the log | Wrong credential or a field id that does not belong to the form you point at (status codes only are logged) |
-| Works in the portal but `chat.py` cannot reach it | `chat.py` and `ui.py` talk to `localhost:8088` only; use the Playground or `azd ai agent invoke` for the deployed agent |
+| Works in the portal but `chat.py` cannot reach it | `chat.py` talks to `localhost:8088` only; use the Playground or `azd ai agent invoke`. `ui.py` can reach the deployed agent: `BOT_URL=<endpoint>` (the Responses URL from `azd ai agent show`) and `az login`; it sends your Entra token |
+| Debug panel is empty | Set `DEBUG_TRACE=true` on the bot (`azd env set DEBUG_TRACE true`, `bash scripts/set-azd-env.sh`, `azd deploy`) and start `ui.py` with `UI_DEBUG=true` and the same `STATE_BLOB_*` settings as the bot. Turn it off again for production: the trace holds customer text |
 
 ## Before this serves real customers
 

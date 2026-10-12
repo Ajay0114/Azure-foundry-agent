@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Marina chat widget demo</title>
+<link rel="stylesheet" href="/widget.css">
+<style>
+  body { margin: 0; font: 16px/1.6 "Segoe UI", system-ui, sans-serif; color: #333; background: #faf7f2; }
+  header { padding: 18px 28px; background: #fff; border-bottom: 1px solid #e7e1d8; font-weight: 600; letter-spacing: .12em; }
+  main { max-width: 760px; margin: 48px auto; padding: 0 20px; }
+  h1 { font-weight: 500; }
+</style>
+</head>
+<body>
+<header>YOUR WEBSITE</header>
+<main>
+  <h1>Host page</h1>
+  <p>This stands in for any page that embeds the assistant. The chat bubble in the corner is the whole integration: it has no debug panel.</p>
+</main>
+<script src="/widget.js"></script>
+<script>
+  MarinaChat.init({
+    teasers: ["Hi, I'm Marina.", "Need to return a product? I can help."]
+  });
+</script>
+</body>
+</html>

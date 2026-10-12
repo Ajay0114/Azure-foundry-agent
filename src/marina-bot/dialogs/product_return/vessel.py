@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from models import Turn
+from shared import trace
 from shared.agent_node import AgentSpec, AgentTool, end_orchestration_tool
 from shared.osw import OswApi, Vessel
 from shared.prompts import render
@@ -212,7 +213,10 @@ def make_tools(osw: OswApi):
         s = turn.session
 
         async def vessel_lookup(args: dict[str, Any]) -> str:
-            text = vessels_to_tool_text(await osw.find_vessels(str(args.get("input", ""))))
+            query = str(args.get("input", ""))
+            found = await trace.call(turn, "api", "osw.find_vessels", osw.find_vessels(query),
+                                     lambda vessels: f'"{query}" -> {len(vessels)} match(es)')
+            text = vessels_to_tool_text(found)
             post_process(turn, text, turn.text)
             return text
 

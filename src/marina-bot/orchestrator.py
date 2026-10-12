@@ -17,6 +17,7 @@ from agent_framework import Executor, Workflow, WorkflowBuilder, WorkflowContext
 
 from dialogs.product_return.workflow import build_product_return_workflow
 from models import Turn, TurnInput
+from shared import trace
 from shared.deps import Deps
 from shared.flow import PERSIST, PromptRunner, connect, goto
 from shared.state_store import StateStore
@@ -51,6 +52,8 @@ class TurnEntry(Executor):
         turn = Turn(text=inp.text, save_keys=inp.save_keys, attachments=inp.attachments,
                     attachments_unusable=inp.attachments_unusable,
                     session=saved.get("session", {}), entities=saved.get("entities", {}))
+        trace.snapshot(turn)
+        trace.event(turn, "turn", "message received", turn.text)
         active = turn.session.get("active_dialog")
         await goto(ctx, turn, PRODUCT_RETURN.lower() if active == PRODUCT_RETURN else "intent_classifier")
 
@@ -64,7 +67,8 @@ class IntentClassifier(Executor):
 
     @handler
     async def run(self, turn: Turn, ctx: WorkflowContext[Turn]) -> None:
-        label = (await self._run(CLASSIFIER_PROMPT + turn.text)).strip().upper()
+        label = (await trace.call(turn, "llm", "intent_classifier", self._run(CLASSIFIER_PROMPT + turn.text),
+                                  lambda out: f"intent: {out.strip().upper()}")).strip().upper()
         if PRODUCT_RETURN in label:
             turn.session["active_dialog"] = PRODUCT_RETURN
             turn.session.pop("dialog_step", None)
@@ -109,6 +113,8 @@ class Persist(Executor):
         # The conversation log behind the transcript CSV: one row per message, with a time (shared/transcript.py).
         record_turn(turn.session, turn.text, turn.replies or [reply], len(turn.attachments) + turn.attachments_unusable,
                     datetime.now(UTC))
+        turn.session["suggestions"] = turn.suggestions          # the buttons the chat window shows under the last question
+        trace.record_turn(turn.session, turn, turn.replies or [reply])
         await asyncio.to_thread(self._store.save, turn.save_keys, {"session": turn.session, "entities": turn.entities})
         await self._write_transcript(turn)
         await ctx.yield_output(reply)

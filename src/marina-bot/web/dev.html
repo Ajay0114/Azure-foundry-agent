@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Marina developer test page</title>
+<link rel="stylesheet" href="/widget.css">
+<style>
+  :root { --green: #2e9d5b; --line: #e3e6ea; --muted: #6b7280; --blue: #1d6fd8; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { font: 13px/1.45 "Segoe UI", system-ui, sans-serif; color: #1f2937; background: #f3f4f6; display: flex; flex-direction: column; }
+  .top { background: #0f172a; color: #fff; padding: 10px 16px; display: flex; gap: 12px; align-items: center; }
+  .top b { letter-spacing: .06em; }
+  .top .warn { margin-left: auto; font-size: 12px; color: #fcd34d; }
+  .main { flex: 1; min-height: 0; display: flex; }
+  .debug { flex: 1; min-width: 0; display: flex; flex-direction: column; background: #fff; border-right: 1px solid var(--line); }
+  .tabs { display: flex; border-bottom: 1px solid var(--line); }
+  .tabs button { background: none; border: 0; padding: 11px 18px; font: inherit; font-weight: 600; color: var(--muted); cursor: pointer; border-bottom: 3px solid transparent; }
+  .tabs button.on { color: var(--blue); border-color: var(--blue); }
+  .tools { margin-left: auto; display: flex; gap: 8px; align-items: center; padding-right: 12px; color: var(--muted); }
+  .tools button { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 4px 10px; cursor: pointer; font: inherit; }
+  .pane { flex: 1; overflow: auto; padding: 8px 16px 24px; }
+  .turn { margin-top: 14px; }
+  .turn h3 { margin: 0 0 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+  .ev { display: flex; gap: 10px; align-items: baseline; padding: 5px 0; border-bottom: 1px solid #f0f1f3; }
+  .dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--green); transform: translateY(0); }
+  .ev.llm .dot { background: #8b5cf6; } .ev.api .dot { background: #0ea5e9; } .ev.var .dot { background: #f59e0b; }
+  .ev.wait .dot { background: #9ca3af; } .ev.error .dot { background: #dc2626; } .ev.end .dot { background: #111827; }
+  .ev .t { flex: 1; min-width: 0; word-break: break-word; }
+  .ev .t small { display: block; color: var(--muted); }
+  .ev .ms { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .ev.error .t { color: #b91c1c; }
+  .ev .old { color: #b91c1c; text-decoration: line-through; } .ev .new { color: #166534; }
+  .empty { color: var(--muted); padding: 24px 0; }
+  .vars table { width: 100%; border-collapse: collapse; }
+  .vars td { padding: 4px 8px; border-bottom: 1px solid #f0f1f3; vertical-align: top; word-break: break-word; }
+  .vars td:first-child { width: 36%; color: var(--muted); }
+  .vars h3 { margin: 16px 0 4px; font-size: 12px; text-transform: uppercase; color: var(--muted); letter-spacing: .05em; }
+  .chat { width: 400px; flex: none; background: #e9edf2; }
+  @media (max-width: 900px) { .main { flex-direction: column-reverse; } .chat { width: 100%; height: 55%; } }
+</style>
+</head>
+<body>
+<div class="top"><b>MARINA</b><span>Developer test page</span><span class="warn">Debug data contains what customers typed. Dev and test only.</span></div>
+<div class="main">
+  <section class="debug">
+    <div class="tabs">
+      <button id="tab-log" class="on">Debug Logs</button>
+      <button id="tab-vars">Session Context &amp; Variables</button>
+      <div class="tools"><label><input type="checkbox" id="follow" checked> follow</label><button id="refresh">Refresh</button></div>
+    </div>
+    <div class="pane" id="log"><div class="empty">Send a message in the chat. Each step the bot runs appears here.</div></div>
+    <div class="pane vars" id="vars" hidden></div>
+  </section>
+  <section class="chat" id="chat"></section>
+</div>
+<script src="/widget.js"></script>
+<script>
+(function () {
+  "use strict";
+  var logPane = document.getElementById("log"), varsPane = document.getElementById("vars");
+  var ids = { session: null, previous: null }, timer = null;
+
+  function text(node, s) { node.textContent = s == null ? "" : String(s); return node; }
+  function mk(tag, cls, s) { var n = document.createElement(tag); if (cls) n.className = cls; if (s != null) n.textContent = s; return n; }
+
+  function label(e) {
+    var map = { turn: "Turn started", transition: "Transitioning", wait: "Waiting for user input", end: "Dialog finished", llm: "Model call", api: "API call", var: "Variable set", error: "Error" };
+    return map[e.kind] || e.kind;
+  }
+  function eventRow(e) {
+    var row = mk("div", "ev " + e.kind), body = mk("div", "t");
+    row.appendChild(mk("span", "dot"));
+    if (e.kind === "transition") {
+      body.textContent = "Transitioning from " + e.name + " to " + e.to;
+    } else if (e.kind === "wait") {
+      body.textContent = e.name + " - waiting for user input";
+    } else if (e.kind === "var") {
+      body.appendChild(mk("span", "", e.name + ": "));
+      body.appendChild(mk("span", "old", e.old)); body.appendChild(document.createTextNode(" → ")); body.appendChild(mk("span", "new", e.new));
+    } else if (e.kind === "error") {
+      body.textContent = (e.of || "step") + " " + e.name + " failed: " + (e.detail || "");
+    } else {
+      body.textContent = label(e) + ": " + e.name;
+      if (e.detail) body.appendChild(mk("small", "", e.detail));
+    }
+    row.appendChild(body);
+    if (e.ms != null) row.appendChild(mk("span", "ms", e.ms + " ms"));
+    return row;
+  }
+  function renderLog(turns) {
+    logPane.textContent = "";
+    if (!turns.length) { logPane.appendChild(mk("div", "empty", "No trace yet. Is DEBUG_TRACE=true set on the bot?")); return; }
+    turns.forEach(function (t) {
+      var box = mk("div", "turn");
+      box.appendChild(mk("h3", "", "Turn " + t.n + (t.user ? " — “" + t.user + "”" : "")));
+      (t.events || []).forEach(function (e) { box.appendChild(eventRow(e)); });
+      logPane.appendChild(box);
+    });
+    if (document.getElementById("follow").checked) logPane.scrollTop = logPane.scrollHeight;
+  }
+  function flat(obj, prefix, out) {
+    Object.keys(obj || {}).sort().forEach(function (k) {
+      var v = obj[k], path = prefix ? prefix + "." + k : k;
+      if (v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length) flat(v, path, out);
+      else out.push([path, typeof v === "object" ? JSON.stringify(v) : v]);
+    });
+    return out;
+  }
+  function renderVars(vars) {
+    varsPane.textContent = "";
+    [["Session", vars.session], ["Entities", vars.entities]].forEach(function (group) {
+      varsPane.appendChild(mk("h3", "", group[0]));
+      var table = mk("table"), rows = flat(group[1], "", []);
+      if (!rows.length) { varsPane.appendChild(mk("div", "empty", "Nothing yet.")); return; }
+      rows.forEach(function (r) { var tr = mk("tr"); tr.appendChild(mk("td", "", r[0])); tr.appendChild(mk("td", "", r[1])); table.appendChild(tr); });
+      varsPane.appendChild(table);
+    });
+  }
+  function refresh() {
+    if (!ids.session && !ids.previous) return;
+    var q = "?session=" + encodeURIComponent(ids.session || "") + "&previous=" + encodeURIComponent(ids.previous || "");
+    fetch("/api/debug" + q).then(function (r) { return r.json(); }).then(function (d) {
+      if (!d.available) { logPane.textContent = ""; logPane.appendChild(mk("div", "empty", d.reason || "No state yet.")); return; }
+      renderLog(d.turns || []); renderVars(d.variables || {});
+    }).catch(function () {});
+  }
+  function show(which) {
+    var logOn = which === "log";
+    logPane.hidden = !logOn; varsPane.hidden = logOn;
+    document.getElementById("tab-log").className = logOn ? "on" : "";
+    document.getElementById("tab-vars").className = logOn ? "" : "on";
+  }
+  document.getElementById("tab-log").onclick = function () { show("log"); };
+  document.getElementById("tab-vars").onclick = function () { show("vars"); };
+  document.getElementById("refresh").onclick = refresh;
+
+  MarinaChat.init({
+    container: "#chat", storageKey: "dev",
+    onReply: function (info) { ids = info; clearTimeout(timer); timer = setTimeout(refresh, 150); },
+    onReset: function () {
+      ids = { session: null, previous: null };
+      logPane.textContent = ""; logPane.appendChild(mk("div", "empty", "New conversation."));
+      varsPane.textContent = "";
+    }
+  });
+})();
+</script>
+</body>
+</html>

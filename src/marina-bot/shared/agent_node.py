@@ -23,6 +23,7 @@ from typing import Any
 from agent_framework import Agent, Executor, Message, WorkflowContext, handler, tool
 
 from models import Turn
+from shared import trace
 from shared.flow import goto, pause
 
 log = logging.getLogger(__name__)
@@ -105,7 +106,8 @@ class AgentNode(Executor):
         tools = spec.make_tools(turn, lambda args: ended.update(args or {"conv_status": "completed"}))
         history = list(turn.session.get("messages", []))[-HISTORY_MESSAGES:]
         try:
-            text = await self._run_agent(spec.build_prompt(turn), history, turn.text, tools)
+            text = await trace.call(turn, "llm", spec.name, self._run_agent(spec.build_prompt(turn), history, turn.text, tools),
+                                    lambda out: "agent finished" if (ended or spec.is_complete(turn)) else "agent asked the customer")
         except Exception:
             # Kore: fallbackBehavior onLLMFail = skipEvent -> carry on to the configured node.
             log.exception("%s failed; skipping to %s", spec.name, self._failure)

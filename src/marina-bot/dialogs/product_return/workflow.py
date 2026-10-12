@@ -42,7 +42,7 @@ from shared.deps import Deps
 from shared.flow import ConfirmNode, MessageNode, PromptNode, ScriptNode, SlotNode, connect, finish, goto
 from shared.prompts import load_prompt
 from shared.dates import read_yes_no
-from shared.validators import parse_email, parse_full_name
+from shared.validators import parse_email, parse_name
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
@@ -92,10 +92,10 @@ def build_product_return_workflow(deps: Deps) -> Workflow:
         "pr_name")
     name = SlotNode(
         "pr_name", NAME_SLOT,
-        prompt=lambda t: "Before we get started, please can you provide your full name?",
+        prompt=lambda t: "Before we get started, please can you provide your name?",
         error="I'm sorry, I did not recognize the name you entered. "
-              "Please enter the name of the person including both the first and last name.",
-        parse=parse_full_name, next_id="pr_redact_name")
+              "Please enter your name (first name, last name, or both).",
+        parse=parse_name, next_id="pr_redact_name")
     redact_name = ScriptNode("pr_redact_name", _redact_name, "pr_email")
     email = SlotNode(
         "pr_email", EMAIL_SLOT,

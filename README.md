@@ -82,10 +82,11 @@ naming the missing settings. **The bot creates real tickets in the Zendesk it is
 ```bash
 uv run --no-sync python main.py        # terminal 1: start the bot on http://localhost:8088 and leave it running
 python3 chat.py                        # terminal 2: talk to it (/new, /attach <https-url>, /quit)
-python3 ui.py                          # or a small web chat page on http://localhost:8000 (UI_PORT=8010 for another port)
+DEBUG_TRACE=true uv run --no-sync python main.py   # (instead of the plain start above) also record the execution trace
+UI_DEBUG=true uv run --no-sync python ui.py        # the chat widget on http://localhost:8000 and the developer page on /dev
 ```
 
-At the upload question, type `skip`, or attach a file **link** (`/attach https://…` in `chat.py`, the 📎 box in `ui.py`).
+At the upload question, type `skip`, or attach a file **link** (`/attach https://…` in `chat.py`, the paperclip in the web widget).
 
 ## Repository layout
 
@@ -100,7 +101,8 @@ At the upload question, type `skip`, or attach a file **link** (`/attach https:/
     ├── orchestrator.py         Top-level workflow: load state, classify intent, run a dialog, save state, reply
     ├── models.py               TurnInput (from the host) and Turn (the envelope passed between nodes)
     ├── chat.py                 Terminal chat client for local testing (not part of the deployed bot)
-    ├── ui.py                   Small local web chat page (stdlib only); forwards messages to the bot
+    ├── ui.py                   Local server for the chat widget (web/): forwards messages to the bot, reads buttons and the trace
+    ├── web/                    widget.js + widget.css (embeddable, no debug code), demo.html, dev.html (debug panel, UI_DEBUG only)
     ├── .env.example            Every setting, with the sandbox Zendesk ids filled in; copy to .env
     ├── Dockerfile, .dockerignore, .azdignore    How the agent is built and what is left out of the package
     ├── pyproject.toml, uv.lock, uv.toml    Dependencies, pinned versions, corporate-certificate setting
@@ -426,5 +428,6 @@ conversation state, which the Zendesk ticket needs. Times are UTC. A conversatio
 - Customer text is HTML-escaped before it goes into a ticket.
 - The conversation transcript, name, email and phone are stored in the state files in clear text (see the state-store
   limitation) and sent to Zendesk, where they belong. Tickets are created in whichever Zendesk `ZENDESK_BASE_URL` names.
-- `ui.py` listens on 127.0.0.1 only and has no login: it is for local testing.
+- `ui.py` listens on 127.0.0.1 only and has no login: it is for local testing. The developer page (`UI_DEBUG`) and the bot's
+  `DEBUG_TRACE` expose what customers typed and every variable: use them in development and test only, never in production.
 - The attachment function downloads whatever https link it is given, so it must restrict the hosts it will fetch from.

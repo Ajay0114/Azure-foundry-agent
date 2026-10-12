@@ -15,6 +15,7 @@ from typing import Any
 from agent_framework import Executor, WorkflowContext, handler
 
 from models import Turn
+from shared import trace
 
 PERSIST = "persist"
 
@@ -28,12 +29,14 @@ def connect(builder, source: Executor, target: Executor):
 
 
 async def goto(ctx: Any, turn: Turn, target_id: str) -> None:
+    trace.event(turn, "transition", turn.route or "turn_entry", to=target_id)       # the node that just ran -> the next one
     turn.route = target_id
     await ctx.send_message(turn)
 
 
 async def pause(ctx: Any, turn: Turn, step_id: str) -> None:
     """End the turn; the user's next message resumes at `step_id`."""
+    trace.event(turn, "wait", step_id, "waiting for user input")
     turn.session["dialog_step"] = step_id
     turn.route = PERSIST
     await ctx.yield_output(turn)
@@ -41,6 +44,7 @@ async def pause(ctx: Any, turn: Turn, step_id: str) -> None:
 
 async def finish(ctx: Any, turn: Turn) -> None:
     """End the turn and the dialog; the next message is classified from scratch."""
+    trace.event(turn, "end", turn.route or "dialog", "dialog finished")
     turn.session.pop("dialog_step", None)
     turn.session["active_dialog"] = None
     turn.route = PERSIST
@@ -83,7 +87,7 @@ class PromptNode(Executor):
 
     @handler
     async def run(self, turn: Turn, ctx: WorkflowContext[Turn, Turn]) -> None:
-        text = await self._run(self._build(turn))
+        text = await trace.call(turn, "llm", self._name, self._run(self._build(turn)), lambda out: f"{len(out)} characters returned")
         turn.session.setdefault("nodeOutputs", {})[self._name] = text
         await goto(ctx, turn, self._next)
 
@@ -130,11 +134,13 @@ class ConfirmNode(Executor):
     async def run(self, turn: Turn, ctx: WorkflowContext[Turn, Turn]) -> None:
         if not turn.resuming:
             turn.say(self._prompt(turn))
+            turn.suggest("Yes", "No")
             await pause(ctx, turn, self.id)
             return
         answer = self._parse(turn.text)
         if answer is None:
             turn.say("Sorry, I didn't catch that. " + self._prompt(turn))
+            turn.suggest("Yes", "No")
             await pause(ctx, turn, self.id)
             return
         turn.resuming = False

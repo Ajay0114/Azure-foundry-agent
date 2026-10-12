@@ -40,6 +40,7 @@ from dialogs.product_return.return_documents import (apply_validation, build_ret
                                                      validation_notes)
 from models import Turn
 from shared.cancel import is_cancel_request
+from shared import trace
 from shared.attachments import AttachmentBlocked, AttachmentError
 from shared.dates import read_yes_no, says_skip
 from shared.deps import Deps
@@ -199,7 +200,7 @@ class AdditionalInfo(QuestionNode):
     async def run(self, turn: Turn, ctx: WorkflowContext[Turn, Turn]) -> None:
         st = PurchaseDetailsState.load(turn.session)
         if not turn.resuming:
-            await self._ask(ctx, turn, st, MSG_ADDITIONAL)
+            await self._ask(ctx, turn, st, MSG_ADDITIONAL, suggest=["Nothing else"])
             return
         turn.resuming = False
         if is_cancel_request(turn.text):
@@ -223,13 +224,13 @@ class UploadFiles(QuestionNode):
             turn.session["zd_tokens_combined"] = []
             await self._continue(ctx, turn, st)
             return
-        await self._ask(ctx, turn, st, message, MSG_UPLOAD)
+        await self._ask(ctx, turn, st, message, MSG_UPLOAD, suggest=["Skip"])
 
     @handler
     async def run(self, turn: Turn, ctx: WorkflowContext[Turn, Turn]) -> None:
         st, s = PurchaseDetailsState.load(turn.session), turn.session
         if not turn.resuming:
-            await self._ask(ctx, turn, st, MSG_START, MSG_UPLOAD)
+            await self._ask(ctx, turn, st, MSG_START, MSG_UPLOAD, suggest=["Skip"])
             return
         turn.resuming = False
         if not turn.attachments and not turn.attachments_unusable:
@@ -238,7 +239,7 @@ class UploadFiles(QuestionNode):
                 return
             if not (says_skip(turn.text) or says_finished(turn.text) or turn.text.strip(" .!").lower() in ("nothing", "none")) \
                     and st.count(st.failures, "upload_text") < 2:
-                await self._ask(ctx, turn, st, MSG_UPLOAD_REMIND)           # a reply that is neither a file nor "skip"
+                await self._ask(ctx, turn, st, MSG_UPLOAD_REMIND, suggest=["Skip"])           # a reply that is neither a file nor "skip"
                 return
             s["zd_tokens_combined"] = []
             await self._continue(ctx, turn, st)
@@ -248,8 +249,10 @@ class UploadFiles(QuestionNode):
             if not turn.attachments or uploader is None:
                 raise AttachmentError("no usable file, or the attachment service is not configured")
             session_id = (turn.save_keys or ["unknown"])[0]
-            s["zd_tokens_combined"] = await uploader.upload(turn.attachments, session_id,
-                                                            str((s.get("piiEntities") or {}).get("emailId") or ""))
+            s["zd_tokens_combined"] = await trace.call(
+                turn, "api", "attachments.upload",
+                uploader.upload(turn.attachments, session_id, str((s.get("piiEntities") or {}).get("emailId") or "")),
+                lambda tokens: f"{len(tokens)} file(s) scanned and staged")
         except AttachmentBlocked as exc:
             log.warning("attachment blocked by the scan: %s", exc.kind)
             await self._retry(ctx, turn, st, MSG_UPLOAD_FILETYPE if exc.kind == "filetype" else MSG_UPLOAD_MALWARE)
@@ -274,7 +277,7 @@ class CreateTicket(QuestionNode):
             st.save(turn.session)
             await finish(ctx, turn)
             return
-        await self._ask(ctx, turn, st, MSG_TICKET_FAILED, MSG_RETRY_QUESTION)
+        await self._ask(ctx, turn, st, MSG_TICKET_FAILED, MSG_RETRY_QUESTION, suggest=["Yes", "No"])
 
     @handler
     async def run(self, turn: Turn, ctx: WorkflowContext[Turn, Turn]) -> None:
@@ -286,7 +289,7 @@ class CreateTicket(QuestionNode):
             turn.resuming = False
             answer = read_yes_no(turn.text)
             if answer is None:
-                await self._ask(ctx, turn, st, MSG_DIDNT_CATCH, MSG_RETRY_QUESTION)
+                await self._ask(ctx, turn, st, MSG_DIDNT_CATCH, MSG_RETRY_QUESTION, suggest=["Yes", "No"])
                 return
             if not answer:
                 turn.say(MSG_NOT_SUBMITTED)
@@ -301,10 +304,13 @@ class CreateTicket(QuestionNode):
         apply_validation(s)                                     # which documents can be requested; adds failure tags
         external_id = s.setdefault("ticketExternalId", uuid.uuid4().hex)
         try:
-            ticket_id = await zendesk.find_by_external_id(external_id) if st.failures.get("ticket") else None
+            ticket_id = (await trace.call(turn, "api", "zendesk.find_by_external_id", zendesk.find_by_external_id(external_id),
+                                          lambda found: f"ticket {found}" if found else "no earlier ticket")
+                         if st.failures.get("ticket") else None)
             if ticket_id is None:
                 payload = build_ticket_payload(s, turn.entities, zendesk.ticket_settings, external_id, self._deps.today())
-                ticket_id = await zendesk.create_ticket(payload)
+                ticket_id = await trace.call(turn, "api", "zendesk.create_ticket", zendesk.create_ticket(payload),
+                                             lambda created: f"ticket {created} created")
         except ZendeskError as exc:
             log.error("ticket creation failed: %s", exc)
             await self._failed(ctx, turn, st)
@@ -313,7 +319,8 @@ class CreateTicket(QuestionNode):
         st.save(s)
         try:
             transcript = [*s.get("transcript", []), f"User: {turn.text}"]
-            await zendesk.add_private_note(ticket_id, build_private_note(transcript))
+            await trace.call(turn, "api", "zendesk.add_private_note", zendesk.add_private_note(ticket_id, build_private_note(transcript)),
+                             lambda _: "conversation transcript")
         except ZendeskError as exc:                             # the ticket exists; the transcript is a bonus
             s["privateNoteFailed"] = True
             log.warning("private note for ticket %s failed: %s", ticket_id, exc)
@@ -331,31 +338,32 @@ class FinaliseRequest(Executor):
         super().__init__(id=PD_FINALISE)
         self._deps = deps
 
-    async def _note(self, ticket_id: int, html_body: str, uploads: list[str] | None = None) -> None:
+    async def _note(self, turn: Turn, ticket_id: int, html_body: str, uploads: list[str] | None = None) -> None:
         try:
-            await self._deps.zendesk.add_private_note(ticket_id, html_body, uploads)
+            await trace.call(turn, "api", "zendesk.add_private_note", self._deps.zendesk.add_private_note(ticket_id, html_body, uploads),
+                             lambda _: "attachments" if uploads else "private note")
         except (ZendeskError, AttributeError) as exc:
             log.warning("private note for ticket %s failed: %s", ticket_id, exc)
 
     async def _request(self, turn: Turn, kind: str, create: Any, payload: dict[str, Any]) -> None:
         status_key = f"{kind}DocumentStatus"
         try:
-            await create(payload)
+            await trace.call(turn, "api", f"documents.{kind}", create(payload), lambda _: "document requested")
             turn.session[status_key] = "created"
         except DocumentError as exc:
             log.error("%s document request failed: %s", kind, exc)
             turn.session[status_key] = "failed"
-            await self._note(turn.session["TicketId"], error_note(kind, exc.status, exc.detail))
+            await self._note(turn, turn.session["TicketId"], error_note(kind, exc.status, exc.detail))
 
     @handler
     async def run(self, turn: Turn, ctx: WorkflowContext[Turn, Turn]) -> None:
         s = turn.session
         ticket_id = s["TicketId"]
         if s.get("zd_tokens_combined"):
-            await self._note(ticket_id, ATTACHMENT_NOTE, s["zd_tokens_combined"])
+            await self._note(turn, ticket_id, ATTACHMENT_NOTE, s["zd_tokens_combined"])
         result = validate_documents(s)
         for note in validation_notes(result):
-            await self._note(ticket_id, note)
+            await self._note(turn, ticket_id, note)
         documents = self._deps.documents
         for kind, ok, make, name in (("returns", result.returns_ok, build_returns_payload, "create_returns_document"),
                                      ("transactions", result.transactions_ok, build_transactions_payload,
